@@ -13,6 +13,7 @@ export class LyricsPage {
         this.id = 'lyrics';
         this.icon = 'format-justify-left-symbolic';
         this.name = 'Lyrics';
+        this.hidden = true; // reached from the music page chat button, not in the dots
         this._ctx = ctx;
         this._lines = [];
         this._key = '';

@@ -2,7 +2,7 @@ import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
-import {Emitter, todayKey, dayKeyOffset} from './util.js';
+import {Emitter, todayKey, dayKeyOffset, dateKeyToMs, minutesNow, minutesOf, nextOccurrence, startOfToday} from './util.js';
 
 Gio._promisify(Gio.DBusConnection.prototype, 'call', 'call_finish');
 
@@ -67,6 +67,18 @@ export class FocusService {
         this._switchMode(false);
     }
 
+    // jump straight to 'focus' or 'break' (resets the timer)
+    setMode(mode) {
+        this.pause();
+        this.mode = mode;
+        this.remaining = this._len(mode);
+        this.changed.emit();
+    }
+
+    get total() {
+        return this._len(this.mode);
+    }
+
     refreshLengths() {
         if (!this.running) this.remaining = this._len(this.mode);
         this.changed.emit();
@@ -118,6 +130,21 @@ export class WaterService {
 
     get goal() { return this._s.get_int('water-goal-ml'); }
     get bottle() { return this._s.get_int('water-bottle-ml'); }
+    get startMin() { return this._s.get_int('water-start-min'); }
+    get endMin() { return this._s.get_int('water-end-min'); }
+    get interval() { return this._s.get_int('water-interval-min'); }
+
+    // how many reminders fit into the reminder hours, the sip each one stands for, and bottle refills
+    get reminderCount() { return Math.max(1, Math.floor((this.endMin - this.startMin) / this.interval)); }
+    get sipMl() { return Math.max(1, Math.round(this.goal / this.reminderCount)); }
+    get sipsPerBottle() { return Math.max(1, Math.round(this.bottle / this.sipMl)); }
+    get refills() { return Math.max(0, Math.ceil(this.goal / this.bottle) - 1); }
+
+    resetToday() {
+        delete this._store.data.water[todayKey()];
+        this._store.save();
+        this.changed.emit();
+    }
 
     _day(key) {
         return this._store.data.water[key] ?? [];
@@ -164,10 +191,10 @@ export class WaterService {
 
     _check() {
         if (!this._s.get_boolean('water-reminders')) return;
-        const hour = GLib.DateTime.new_now_local().get_hour();
-        if (hour < this._s.get_int('water-start-hour') || hour >= this._s.get_int('water-end-hour')) return;
+        const now = minutesNow();
+        if (now < this.startMin || now >= this.endMin) return;
         if (this.total() >= this.goal) return;
-        const every = this._s.get_int('water-interval-min') * 60 * 1000;
+        const every = this.interval * 60 * 1000;
         if (Date.now() - this._lastRemind < every) return;
         this._lastRemind = Date.now();
         this.onReminder?.();
@@ -196,10 +223,43 @@ export class TodoService {
         return this._store.data.tasks;
     }
 
-    add(title, due) {
+    // start/end as minutes after midnight (older saves only have `due`)
+    startOf(t) {
+        return t.startMin ?? (t.due ? minutesOf(t.due) : null);
+    }
+
+    isDone(t) {
+        return t.repeat === 'daily' ? t.doneDay === todayKey() : !!t.done;
+    }
+
+    // tasks that count today: daily ones, open ones, and one-off tasks finished today
+    visible() {
+        const today = todayKey();
+        return this.tasks.filter(t => t.repeat === 'daily' || !t.done || !t.doneDay || t.doneDay === today);
+    }
+
+    stats() {
+        const v = this.visible();
+        return {done: v.filter(t => this.isDone(t)).length, total: v.length};
+    }
+
+    add(title, {startMin = null, endMin = null, repeat = 'daily'} = {}) {
         const id = this._store.nextId();
-        this.tasks.push({id, title, due, done: false, alerted: false,
-            color: TASK_COLORS[id % TASK_COLORS.length]});
+        this.tasks.push({
+            id, title, startMin, endMin, repeat, done: false, alerted: false,
+            due: startMin === null ? null : nextOccurrence(startMin),
+            color: TASK_COLORS[id % TASK_COLORS.length],
+        });
+        this._store.save();
+        this.changed.emit();
+    }
+
+    update(id, title, {startMin = null, endMin = null, repeat = 'daily'} = {}) {
+        const t = this.tasks.find(x => x.id === id);
+        if (!t) return;
+        Object.assign(t, {title, startMin, endMin, repeat, alerted: false});
+        t.due = startMin === null ? null : nextOccurrence(startMin);
+        if (repeat === 'daily') t.done = false;
         this._store.save();
         this.changed.emit();
     }
@@ -207,7 +267,18 @@ export class TodoService {
     toggle(id) {
         const t = this.tasks.find(x => x.id === id);
         if (!t) return;
-        t.done = !t.done;
+        if (this.isDone(t)) {
+            t.done = false;
+            t.doneDay = null;
+        } else {
+            t.done = true;
+            t.doneDay = todayKey();
+        }
+        const start = this.startOf(t);
+        if (t.repeat === 'daily' && start !== null) {
+            t.due = nextOccurrence(start);
+            t.alerted = false;
+        }
         this._store.save();
         this.changed.emit();
     }
@@ -230,13 +301,86 @@ export class TodoService {
 
     _check() {
         const now = Date.now();
-        const t = this.tasks.find(x => !x.done && x.due && !x.alerted && x.due <= now);
-        if (!t) return;
-        t.alerted = true;
+        const midnight = startOfToday();
+        let rolled = false;
+        for (const t of this.tasks) {
+            // a daily task left over from an earlier day comes back fresh
+            const start = this.startOf(t);
+            if (t.repeat === 'daily' && start !== null && t.due && t.due < midnight) {
+                t.due = nextOccurrence(start);
+                t.alerted = false;
+                rolled = true;
+            }
+        }
+        const t = this.tasks.find(x => !this.isDone(x) && x.due && !x.alerted && x.due <= now);
+        if (!t && !rolled) return;
+        if (t) t.alerted = true;
+        this._store.save();
+        this.changed.emit();
+        if (t) {
+            playChime();
+            this.onDue?.(t);
+        }
+    }
+
+    destroy() {
+        // timer is owned (and cleared) by the shared Timers helper
+    }
+}
+
+// ---------------------------------------------------------------- calendar reminders
+export class CalendarService {
+    constructor(store, timers) {
+        this._store = store;
+        this.changed = new Emitter();
+        this.onDue = null;
+        this._id = timers.add(10 * 1000, () => {
+            this._check();
+            return true;
+        });
+    }
+
+    get items() {
+        return (this._store.data.reminders ??= []);
+    }
+
+    on(key) {
+        return this.items.filter(r => r.date === key).sort((a, b) => (a.startMin ?? -1) - (b.startMin ?? -1));
+    }
+
+    // reminders without a time ring at 09:00
+    add(date, title, startMin = null) {
+        const due = dateKeyToMs(date, startMin ?? 540);
+        this.items.push({id: this._store.nextId(), title, date, startMin, due, alerted: due <= Date.now()});
+        this._store.save();
+        this.changed.emit();
+    }
+
+    remove(id) {
+        const i = this.items.findIndex(r => r.id === id);
+        if (i >= 0) this.items.splice(i, 1);
+        this._store.save();
+        this.changed.emit();
+    }
+
+    snooze(id, minutes) {
+        const r = this.items.find(x => x.id === id);
+        if (!r) return;
+        r.due = Date.now() + minutes * 60 * 1000;
+        r.alerted = false;
+        this._store.save();
+        this.changed.emit();
+    }
+
+    _check() {
+        const now = Date.now();
+        const r = this.items.find(x => !x.alerted && x.due <= now);
+        if (!r) return;
+        r.alerted = true;
         this._store.save();
         this.changed.emit();
         playChime();
-        this.onDue?.(t);
+        this.onDue?.(r);
     }
 }
 

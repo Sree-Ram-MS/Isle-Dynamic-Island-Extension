@@ -6,16 +6,26 @@
 .nusa-eye { background-color: #fff; border-radius: 10px; }
 .nusa-eye.doze { border-radius: 2px; }
 .nusa-eq { background-color: #ffb454; border-radius: 1px; width: 3px; }
-.nusa-expanded { padding: 10px 16px 6px 16px; spacing: 4px; }
-.nusa-bar { spacing: 6px; padding-top: 2px; }
-.nusa-bar-btn { padding: 4px 8px; border-radius: 10px; color: #8e8e93; }
-.nusa-bar-btn:hover { background-color: rgba(255,255,255,0.10); color: #fff; }
-.nusa-bar-btn.active { color: #ffb454; background-color: rgba(255,180,84,0.14); }
+.nusa-expanded { padding: 10px 12px 8px 12px; }
+.nusa-ring { border-color: #30d158; border-style: solid; background-color: transparent; }
+.nusa-header { spacing: 8px; padding: 0 6px; }
+.nusa-hdr-date { color: #a1a1a6; font-weight: 600; }
+.nusa-hdr-time { color: #fff; font-weight: 800; font-size: 1.35em; }
+.nusa-hdr-ampm { color: #a1a1a6; font-weight: 700; font-size: 0.78em; padding-bottom: 2px; }
+.nusa-hdr-btn { padding: 4px; border-radius: 12px; color: #8e8e93; }
+.nusa-hdr-btn:hover { background-color: rgba(255,255,255,0.12); color: #fff; }
+.nusa-arrow { padding: 6px; border-radius: 99px; background-color: rgba(255,255,255,0.12); color: #fff; }
+.nusa-arrow:hover { background-color: rgba(255,255,255,0.24); }
+.nusa-arrow:active { background-color: rgba(255,255,255,0.34); }
+.nusa-dots { padding-top: 2px; }
+.nusa-pdot { background-color: rgba(255,255,255,0.28); border-radius: 9px; }
+.nusa-pdot:hover { background-color: rgba(255,255,255,0.5); }
+.nusa-pdot.active { background-color: #fff; }
 .nusa-title { font-weight: 700; font-size: 1.15em; color: #fff; }
 .nusa-sub { color: #a1a1a6; }
 .nusa-dim { color: #8e8e93; font-size: 0.85em; }
 .nusa-big { font-weight: 700; font-size: 2.6em; color: #fff; }
-.nusa-art { border-radius: 12px; background-color: #1c1c1e; }
+.nusa-art { border-radius: 14px; background-color: #1c1c1e; }
 .nusa-ctl { padding: 6px 10px; border-radius: 12px; color: #fff; }
 .nusa-ctl:hover { background-color: rgba(255,255,255,0.12); }
 .nusa-ctl:active { background-color: rgba(255,255,255,0.22); }
@@ -42,3 +52,101 @@
 .nusa-bar-col { background-color: #4fb7ff; border-radius: 3px; width: 14px; }
 .nusa-bar-col.today { background-color: #ffb454; }
 .nusa-alert { spacing: 6px; }
+.nusa-white { color: #fff; }
+.nusa-ftitle { font-weight: 700; color: #e6e6ea; font-size: 1.05em; padding-left: 2px; }
+.nusa-fbig { font-weight: 800; font-size: 2.7em; color: #fff; }
+.nusa-fsub { color: #a1a1a6; font-weight: 500; }
+.nusa-round { padding: 8px; border-radius: 99px; background-color: rgba(255,255,255,0.10); color: #fff; }
+.nusa-round:hover { background-color: rgba(255,255,255,0.22); }
+.nusa-fpill { padding: 8px 14px; border-radius: 99px; background-color: rgba(255,255,255,0.10); color: #fff; }
+.nusa-fpill:hover { background-color: rgba(255,255,255,0.20); }
+.nusa-fpill.active { background-color: rgba(150,160,195,0.38); }
+.nusa-fpill-text { font-weight: 600; color: #fff; }
+.nusa-fplay { padding: 8px 28px; border-radius: 99px; color: #fff; }
+.nusa-fplay:hover { box-shadow: inset 0 0 0 99px rgba(255,255,255,0.14); }
+.nusa-hdr-title { font-weight: 800; font-size: 1.1em; color: #fff; }
+.nusa-wbig { font-weight: 800; font-size: 2.7em; color: #fff; }
+.nusa-wgoal { font-weight: 700; color: #c7c7cc; padding-bottom: 5px; }
+.nusa-wsub { color: #c7c7cc; font-weight: 500; }
+.nusa-switch { padding: 2px; border-radius: 99px; background-color: rgba(255,255,255,0.22); }
+.nusa-switch.on { background-color: #3a8bff; }
+.nusa-knob { background-color: #fff; border-radius: 99px; }
+.nusa-wdrink { padding: 7px 14px; border-radius: 99px; background-color: #2f7cf6; color: #fff; }
+.nusa-wdrink:hover { background-color: #4a90ff; }
+.nusa-wdrop { color: #b9d8ff; }
+.nusa-wset { padding: 7px 14px; border-radius: 99px; background-color: rgba(255,255,255,0.16); color: #fff; }
+.nusa-wset:hover { background-color: rgba(255,255,255,0.26); }
+.nusa-vdiv { background-color: rgba(110,150,255,0.35); }
+.nusa-gdot { background-color: rgba(255,255,255,0.35); border-radius: 9px; }
+.nusa-gdot.active { background-color: #fff; }
+.nusa-axis { color: #a1a1a6; font-size: 0.85em; font-weight: 600; }
+.nusa-gpct { color: #fff; font-weight: 800; font-size: 2.3em; }
+.nusa-gpct-s { color: #c7c7cc; font-weight: 700; font-size: 1.05em; }
+/* water settings sub-view */
+.nusa-slabel { font-weight: 800; color: #fff; }
+.nusa-sval { font-weight: 800; font-size: 1.25em; color: #fff; }
+.nusa-snote { color: #8e8e93; font-size: 0.74em; font-weight: 500; }
+.nusa-sround { padding: 5px; border-radius: 99px; background-color: rgba(255,255,255,0.14); color: #fff; }
+.nusa-sround:hover { background-color: rgba(255,255,255,0.26); }
+.nusa-schip { padding: 5px 13px; border-radius: 99px; color: #8e8e93; font-weight: 700; }
+.nusa-schip:hover { background-color: rgba(255,255,255,0.10); color: #fff; }
+.nusa-schip.active { background-color: #3cc6f4; color: #0a5d86; }
+.nusa-scard { background-color: rgba(60,110,190,0.22); border-radius: 18px; padding: 6px 10px; }
+.nusa-scount { color: #3cc6f4; font-weight: 800; font-size: 1.9em; }
+.nusa-scount-l { color: #3cc6f4; font-size: 0.82em; font-weight: 600; }
+.nusa-sline { background-color: rgba(120,160,255,0.30); margin: 3px 14px; }
+.nusa-sreset { padding: 6px 14px; border-radius: 99px; background-color: rgba(255,255,255,0.12); color: #fff; }
+.nusa-sreset:hover { background-color: rgba(255,255,255,0.22); }
+/* to-do page */
+.nusa-tcount { color: #fff; font-weight: 800; font-size: 2.5em; }
+.nusa-tcap { color: #7f93b5; font-weight: 500; font-size: 0.9em; }
+.nusa-tbadge { background-color: #2f7cf6; border-radius: 99px; width: 7px; height: 7px; }
+.nusa-tadd { padding: 6px 12px 6px 7px; border-radius: 99px; background-color: rgba(48,209,88,0.20); color: #5fe486; font-weight: 600; }
+.nusa-tadd:hover, .nusa-tadd.active { background-color: rgba(48,209,88,0.34); }
+.nusa-tplus { color: #1db954; }
+.nusa-tedit { padding: 6px 10px; border-radius: 99px; color: #aeb7c8; font-weight: 600; }
+.nusa-tedit:hover { background-color: rgba(255,255,255,0.10); color: #fff; }
+.nusa-tedit.active { background-color: rgba(255,255,255,0.16); color: #fff; }
+.nusa-tentry { background-color: rgba(255,255,255,0.06); border: 1.5px solid rgba(255,255,255,0.55); border-radius: 99px; color: #fff; padding: 4px 10px; caret-color: #30d158; selection-background-color: #30d158; selected-color: #000; }
+.nusa-tentry:focus { border-color: #fff; }
+.nusa-tentry:error { border-color: #ff453a; }
+.nusa-tentry StIcon { color: #30d158; }
+.nusa-ttime { background-color: transparent; border: 1.5px solid transparent; border-radius: 99px; color: #fff; padding: 2px 6px; caret-color: #30d158; }
+.nusa-ttime:focus { border-color: rgba(255,255,255,0.4); }
+.nusa-ttime:error { border-color: #ff453a; }
+.nusa-ttime StIcon { color: #c7c7cc; }
+.nusa-tchip { padding: 3px 11px; border-radius: 99px; background-color: rgba(255,255,255,0.12); color: #d1d1d6; font-weight: 600; font-size: 0.85em; }
+.nusa-tchip:hover { background-color: rgba(255,255,255,0.22); }
+.nusa-tcancel { padding: 6px 16px; border-radius: 99px; background-color: rgba(255,255,255,0.12); color: #fff; font-weight: 600; }
+.nusa-tcancel:hover { background-color: rgba(255,255,255,0.22); }
+.nusa-tsave { padding: 6px 22px; border-radius: 99px; background-color: #30d158; color: #fff; font-weight: 700; }
+.nusa-tsave:hover { background-color: #4be072; }
+.nusa-trow { padding: 3px 6px; border-radius: 10px; }
+.nusa-trow:hover { background-color: rgba(255,255,255,0.07); }
+.nusa-ttime-dim { color: #8e8e93; font-size: 0.8em; }
+/* power + hardware cards */
+.nusa-hcard { background-color: rgba(255,255,255,0.07); border-radius: 14px; padding: 4px 10px; }
+.nusa-hlabel { color: #8e8e93; font-size: 0.72em; font-weight: 600; }
+.nusa-hvalue { color: #fff; font-weight: 800; font-size: 1.05em; }
+.nusa-htrack { background-color: rgba(255,255,255,0.14); border-radius: 99px; }
+.nusa-hfill { border-radius: 99px; }
+.nusa-pcard { background-color: rgba(255,255,255,0.07); border-radius: 16px; padding: 8px 12px; }
+.nusa-ptitle { color: #fff; font-weight: 800; font-size: 1.6em; }
+.nusa-ptitle.dim { color: #8e8e93; font-size: 1.1em; }
+/* calendar */
+.nusa-cmonth { color: #ff453a; font-weight: 700; font-size: 0.78em; }
+.nusa-cweekday { color: #ff453a; font-weight: 800; font-size: 1.15em; }
+.nusa-cbig { color: #fff; font-weight: 700; font-size: 3.4em; }
+.nusa-cnav { color: #fff; font-weight: 700; font-size: 0.85em; }
+.nusa-cstep { padding: 1px 6px; border-radius: 99px; color: #8e8e93; }
+.nusa-cstep:hover { background-color: rgba(255,255,255,0.14); color: #fff; }
+.nusa-cdow { color: #6e6e73; font-size: 0.72em; font-weight: 700; }
+.nusa-cday { color: #fff; font-size: 0.78em; font-weight: 600; border-radius: 99px; text-align: center; }
+.nusa-cday:hover { background-color: rgba(255,255,255,0.14); }
+.nusa-cday.other { color: #5a5a5f; }
+.nusa-cday.has { color: #ffb454; }
+.nusa-cday.sel { border: 1px solid rgba(255,255,255,0.7); }
+.nusa-cday.today { background-color: #2f7cf6; color: #fff; }
+.nusa-cadd { padding: 1px 9px; border-radius: 99px; background-color: rgba(255,255,255,0.12); color: #fff; font-size: 0.8em; font-weight: 700; }
+.nusa-cadd:hover { background-color: rgba(255,255,255,0.24); }
+.nusa-cbar { background-color: #ffb454; border-radius: 2px; }

@@ -6,7 +6,7 @@ export class Store {
     constructor() {
         this._dir = GLib.build_filenamev([GLib.get_user_data_dir(), 'nusa-notch']);
         this._file = GLib.build_filenamev([this._dir, 'data.json']);
-        this.data = {tasks: [], water: {}, shelf: [], nextId: 1};
+        this.data = {tasks: [], water: {}, shelf: [], reminders: [], nextId: 1};
         this._saveId = 0;
         this._load();
     }

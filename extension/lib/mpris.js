@@ -22,10 +22,13 @@ const PlayerProxy = Gio.DBusProxy.makeProxyWrapper(PLAYER_XML);
 
 function unpackMeta(raw) {
     const meta = {};
-    try {
-        for (const k in raw) meta[k] = raw[k].deepUnpack();
-    } catch (_e) {
-        // ignore malformed metadata
+    if (!raw) return meta;
+    for (const k in raw) {
+        try {
+            meta[k] = raw[k].deepUnpack();
+        } catch (_e) {
+            // ignore one malformed entry, keep the rest
+        }
     }
     return meta;
 }
@@ -39,6 +42,8 @@ export class MprisWatcher {
         this._pos = {ms: 0, at: Date.now()};
         this._nameSub = 0;
         this._destroyed = false;
+        this._retry = new Set();
+        this._scanId = 0;
     }
 
     async start() {
@@ -52,30 +57,54 @@ export class MprisWatcher {
                 if (newOwner) this._add(name);
                 else this._remove(name);
             });
+        await this._scan();
+        // Browsers export their MPRIS object lazily, so look again every few seconds
+        this._scanId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 4, () => {
+            this._scan().then(() => {
+                for (const e of this._players.values()) this._sync(e, true);
+            });
+            return GLib.SOURCE_CONTINUE;
+        });
+    }
+
+    async _scan() {
         try {
-            const res = await bus.call(
+            const res = await Gio.DBus.session.call(
                 'org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus', 'ListNames',
                 null, new GLib.VariantType('(as)'), Gio.DBusCallFlags.NONE, -1, null);
+            if (this._destroyed) return;
             const [names] = res.deepUnpack();
             for (const n of names) if (n.startsWith(PREFIX)) this._add(n);
+            for (const n of [...this._players.keys()]) if (!names.includes(n)) this._remove(n);
         } catch (e) {
             console.error(`[nusa-notch] MPRIS ListNames failed: ${e.message}`);
         }
     }
 
-    _add(name) {
+    _add(name, tries = 0) {
         if (this._players.has(name)) return;
         const entry = {name, proxy: null, status: 'Stopped', meta: {}, sig: 0};
         this._players.set(name, entry);
         new PlayerProxy(Gio.DBus.session, name, OBJ, (proxy, err) => {
-            if (err || this._destroyed || !this._players.has(name)) {
+            if (this._destroyed || !this._players.has(name)) return;
+            if (err || !proxy) {
+                console.error(`[nusa-notch] MPRIS ${name}: proxy failed (${err?.message ?? 'unknown'})`);
                 this._players.delete(name);
+                if (tries < 5) {
+                    const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1500, () => {
+                        this._retry.delete(id);
+                        if (!this._destroyed) this._add(name, tries + 1);
+                        return GLib.SOURCE_REMOVE;
+                    });
+                    this._retry.add(id);
+                }
                 return;
             }
+            console.log(`[nusa-notch] MPRIS player ready: ${name}`);
             entry.proxy = proxy;
             entry.sig = proxy.connect('g-properties-changed', () => this._sync(entry));
             this._sync(entry);
-        }, null, Gio.DBusProxyFlags.DO_NOT_AUTO_START);
+        }, null, Gio.DBusProxyFlags.NONE);
     }
 
     _remove(name) {
@@ -87,12 +116,14 @@ export class MprisWatcher {
         this.changed.emit();
     }
 
-    _sync(entry) {
+    _sync(entry, quiet = false) {
         const proxy = entry.proxy;
         if (!proxy) return;
         const before = this.trackKey();
+        const beforeStatus = entry.status;
         entry.status = proxy.PlaybackStatus ?? 'Stopped';
         entry.meta = unpackMeta(proxy.Metadata);
+        if (quiet && beforeStatus === entry.status && before === this.trackKey()) return;
         if (entry.status === 'Playing') this._lastActive = entry.name;
         if (this.active === entry && before !== this.trackKey()) this._pos = {ms: 0, at: Date.now()};
         if (this.active === entry) this.refreshPosition();
@@ -213,6 +244,10 @@ export class MprisWatcher {
 
     destroy() {
         this._destroyed = true;
+        if (this._scanId) GLib.source_remove(this._scanId);
+        this._scanId = 0;
+        for (const id of this._retry) GLib.source_remove(id);
+        this._retry.clear();
         if (this._nameSub) Gio.DBus.session.signal_unsubscribe(this._nameSub);
         for (const e of this._players.values())
             if (e.proxy && e.sig) e.proxy.disconnect(e.sig);

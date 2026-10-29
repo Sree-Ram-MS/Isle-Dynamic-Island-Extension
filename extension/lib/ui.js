@@ -69,3 +69,23 @@ export function emptyState(ctx, iconName, title, sub) {
     if (sub) box.add_child(makeLabel(sub, 'nusa-dim'));
     return box;
 }
+
+// Thin rounded progress bar that always fills from the left. set(0..1)
+export function thinBar(height, color) {
+    const track = new St.Widget({style_class: 'nusa-htrack', x_expand: true, height, layout_manager: new Clutter.FixedLayout()});
+    const fill = new St.Widget({style_class: 'nusa-hfill'});
+    fill.set_style(`background-color: ${color};`);
+    fill.set_position(0, 0);
+    fill.set_size(0, height);
+    track.add_child(fill);
+    let frac = 0;
+    const apply = () => fill.set_size(Math.round(track.width * frac), height);
+    track.connect('notify::allocation', apply);
+    return {
+        actor: track,
+        set(f) {
+            frac = Math.max(0, Math.min(1, f));
+            apply();
+        },
+    };
+}

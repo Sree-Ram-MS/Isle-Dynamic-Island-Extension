@@ -2,7 +2,7 @@ import Clutter from 'gi://Clutter';
 import St from 'gi://St';
 
 import {BATTERY_STATE} from '../lib/services.js';
-import {emptyState, hbox, makeIcon, makeLabel, progressBar, vbox} from '../lib/ui.js';
+import {hbox, makeIcon, makeLabel, thinBar, vbox} from '../lib/ui.js';
 
 function eta(seconds) {
     if (!seconds) return '';
@@ -11,94 +11,93 @@ function eta(seconds) {
     return h ? `${h} h ${m} min` : `${m} min`;
 }
 
-export class ChargingPage {
+// Battery / charging and connected Bluetooth headphones, side by side on one page.
+export class PowerPage {
     constructor(ctx) {
-        this.id = 'charging';
+        this.id = 'power';
         this.icon = 'battery-full-charging-symbolic';
-        this.name = 'Charging';
+        this.name = 'Power';
+        this.title = 'Battery & Headphones';
         this._ctx = ctx;
+        this._visible = false;
         this.actor = new St.Bin({x_expand: true, y_expand: true});
-        this._unsub = ctx.sys.changed.connect(() => this.refresh());
-        this.refresh();
+        this._root = hbox(ctx.px(8), {x_expand: true, y_expand: true});
+        this.actor.set_child(this._root);
+        this._batt = vbox(ctx.px(4), {style_class: 'nusa-pcard', x_expand: true, y_expand: true, y_align: Clutter.ActorAlign.FILL});
+        this._phones = vbox(ctx.px(4), {style_class: 'nusa-pcard', x_expand: true, y_expand: true, y_align: Clutter.ActorAlign.FILL});
+        this._root.add_child(this._batt);
+        this._root.add_child(this._phones);
+        this._unsub = ctx.sys.changed.connect(() => {
+            this._drawBattery();
+            if (this._visible) this._drawHeadphones();
+        });
+        this._drawBattery();
+        this._drawHeadphones();
     }
 
-    refresh() {
+    _bar(frac, color) {
+        const bar = thinBar(this._ctx.px(5), color);
+        bar.set(frac);
+        return bar.actor;
+    }
+
+    // a card: big icon + value, caption line, optional bar
+    _fill(card, {icon, big, caption, frac, color, dim}) {
         const {px} = this._ctx;
+        card.destroy_all_children();
+        const col = vbox(px(5), {x_expand: true, y_expand: true, y_align: Clutter.ActorAlign.CENTER});
+        const top = hbox(px(8), {y_align: Clutter.ActorAlign.CENTER});
+        top.add_child(makeIcon(icon, px(26), dim ? 'nusa-dim' : ''));
+        top.add_child(makeLabel(big, dim ? 'nusa-ptitle dim' : 'nusa-ptitle', {ellipsize: true, xExpand: true}));
+        col.add_child(top);
+        col.add_child(makeLabel(caption, 'nusa-sub', {ellipsize: true}));
+        if (frac !== null && frac !== undefined) col.add_child(this._bar(frac, color));
+        card.add_child(col);
+    }
+
+    _drawBattery() {
         const b = this._ctx.sys.battery;
         if (!b.present) {
-            this.actor.set_child(emptyState(this._ctx, 'battery-missing-symbolic', 'No battery', 'This computer runs on mains power'));
+            this._fill(this._batt, {icon: 'battery-missing-symbolic', big: 'No battery', caption: 'Running on mains power', dim: true});
             return;
         }
         const charging = b.state === 1;
-        const bar = progressBar(px(220), '');
-        bar.set(b.percent / 100);
-        const col = vbox(px(4), {x_expand: true, y_expand: true, x_align: Clutter.ActorAlign.CENTER, y_align: Clutter.ActorAlign.CENTER});
-        const top = hbox(px(10), {x_align: Clutter.ActorAlign.CENTER});
-        top.add_child(makeIcon(charging ? 'battery-full-charging-symbolic' : 'battery-good-symbolic', px(30)));
-        top.add_child(makeLabel(`${b.percent}%`, 'nusa-big', {ellipsize: false}));
-        col.add_child(top);
-        col.add_child(bar.actor);
         let sub = BATTERY_STATE[b.state] ?? '';
-        if (charging && b.timeToFull) sub += ` · ${eta(b.timeToFull)} until full`;
+        if (charging && b.timeToFull) sub += ` · ${eta(b.timeToFull)} to full`;
         else if (b.state === 2 && b.timeToEmpty) sub += ` · ${eta(b.timeToEmpty)} left`;
-        const subLabel = makeLabel(sub, 'nusa-sub', {ellipsize: false});
-        subLabel.x_align = Clutter.ActorAlign.CENTER;
-        col.add_child(subLabel);
-        this.actor.set_child(col);
-    }
-
-    onShow() { this.refresh(); }
-    onHide() {}
-
-    destroy() {
-        this._unsub();
-        this.actor.destroy();
-    }
-}
-
-export class HeadphonesPage {
-    constructor(ctx) {
-        this.id = 'headphones';
-        this.icon = 'audio-headphones-symbolic';
-        this.name = 'Headphones';
-        this._ctx = ctx;
-        this.actor = new St.Bin({x_expand: true, y_expand: true});
-        this._unsub = ctx.sys.changed.connect(() => {
-            if (this._visible) this.refresh();
+        const color = charging || b.percent > 20 ? '#30d158' : (b.percent > 10 ? '#ff9f0a' : '#ff453a');
+        this._fill(this._batt, {
+            icon: charging ? 'battery-full-charging-symbolic' : 'battery-good-symbolic',
+            big: `${b.percent}%`, caption: sub, frac: b.percent / 100, color,
         });
-        this._visible = false;
-        this.refresh();
     }
 
-    async refresh() {
-        const {px} = this._ctx;
+    async _drawHeadphones() {
         const devices = await this._ctx.sys.connectedHeadphones();
+        if (!this._phones || !this.actor) return;
         if (!devices.length) {
-            this.actor.set_child(emptyState(this._ctx, 'audio-headphones-symbolic', 'No headphones connected', 'Pair Bluetooth headphones to see them here'));
+            this._fill(this._phones, {icon: 'audio-headphones-symbolic', big: 'Headphones', caption: 'Not connected', dim: true});
             return;
         }
-        const col = vbox(px(8), {x_expand: true, y_expand: true, x_align: Clutter.ActorAlign.CENTER, y_align: Clutter.ActorAlign.CENTER});
-        for (const d of devices) {
-            const row = hbox(px(12), {x_align: Clutter.ActorAlign.CENTER});
-            row.add_child(makeIcon('audio-headphones-symbolic', px(30)));
-            const info = vbox(px(2));
-            info.add_child(makeLabel(d.name, 'nusa-title'));
-            info.add_child(makeLabel(d.battery !== null ? `Battery ${d.battery}%` : 'Connected', 'nusa-sub'));
-            row.add_child(info);
-            col.add_child(row);
-        }
-        this.actor.set_child(col);
+        const d = devices[0];
+        const more = devices.length > 1 ? ` (+${devices.length - 1})` : '';
+        this._fill(this._phones, {
+            icon: 'audio-headphones-symbolic', big: d.name, caption: (d.battery !== null ? `Battery ${d.battery}%` : 'Connected') + more,
+            frac: d.battery !== null ? d.battery / 100 : null, color: '#3cc6f4',
+        });
     }
 
     onShow() {
         this._visible = true;
-        this.refresh();
+        this._drawBattery();
+        this._drawHeadphones();
     }
 
     onHide() { this._visible = false; }
 
     destroy() {
         this._unsub();
+        this._phones = null;
         this.actor.destroy();
     }
 }

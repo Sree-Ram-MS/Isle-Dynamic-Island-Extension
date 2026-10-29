@@ -1,8 +1,8 @@
 #!/bin/sh
-# Usage: ./build-deb.sh   ->  dist/nusa-notch_1.0.0_all.deb
+# Usage: ./build-deb.sh   ->  dist/nusa-notch_<version>_all.deb
 set -e
 cd "$(dirname "$0")"
-VERSION=1.0.1
+VERSION=1.5.1
 UUID=nusa-notch@linux-clone
 STAGE=$(mktemp -d)
 EXT="$STAGE/usr/share/gnome-shell/extensions/$UUID"
@@ -33,9 +33,9 @@ Homepage: https://rama2555.github.io/nusa/
 Description: Notch at the top of the screen for music, lyrics, timers and more
  An unofficial Linux clone of the Nusa notch app, built as a GNOME Shell
  extension. Shows what is playing (any MPRIS player) with synced lyrics from
- LRCLIB, a focus timer, water reminders, a file/text shelf, a to-do list with
- alerts, and status peeks for battery, Wi-Fi, Bluetooth headphones and Caps
- Lock. Opens when you hover over it.
+ LRCLIB, a focus timer, water reminders, a file/text shelf, a to-do list,
+ a calendar with reminders, a hardware monitor, battery and headphone status,
+ and peeks for Wi-Fi and Caps Lock. Opens when you hover over it.
 C
 
 find "$STAGE" -type d -exec chmod 755 {} +

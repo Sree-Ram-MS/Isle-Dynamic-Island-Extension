@@ -9,9 +9,10 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Store} from './lib/store.js';
 import {MprisWatcher, destroyArtSession} from './lib/mpris.js';
 import {LyricsClient} from './lib/lyrics.js';
-import {FocusService, IdleWatcher, SystemWatcher, TodoService, WaterService, playChime} from './lib/services.js';
+import {CalendarService, FocusService, IdleWatcher, SystemWatcher, TodoService, WaterService, playChime} from './lib/services.js';
 import {Timers, fmtTime} from './lib/util.js';
 import {hbox, iconButton, makeIcon, makeLabel, pill, vbox} from './lib/ui.js';
+import {makeRing} from './lib/ring.js';
 
 import {MusicPage} from './pages/music.js';
 import {LyricsPage} from './pages/lyrics.js';
@@ -19,12 +20,14 @@ import {FocusPage} from './pages/focus.js';
 import {WaterPage} from './pages/water.js';
 import {ShelfPage} from './pages/shelf.js';
 import {TodoPage} from './pages/todo.js';
-import {ChargingPage, HeadphonesPage} from './pages/power.js';
+import {CalendarPage} from './pages/calendar.js';
+import {PowerPage} from './pages/power.js';
+import {HardwarePage} from './pages/hardware.js';
 
 const BASE_W = 190;
 const BASE_H = 32;
-const OPEN_W = 480;
-const OPEN_H = 200;
+const OPEN_W = 620;
+const OPEN_H = 208;
 
 export class Notch {
     constructor(ext) {
@@ -40,6 +43,7 @@ export class Notch {
         this._scrollAcc = 0;
         this._scrollAt = 0;
         this._signals = [];
+        this._subview = null;
     }
 
     // ------------------------------------------------------------ lifecycle
@@ -53,18 +57,23 @@ export class Notch {
         this._focus = new FocusService(this._settings, this._timers);
         this._water = new WaterService(this._settings, this._store, this._timers);
         this._todo = new TodoService(this._store, this._timers);
+        this._cal = new CalendarService(this._store, this._timers);
         this._sys = new SystemWatcher();
 
         this._ctx = {
             settings: this._settings, store: this._store, timers: this._timers,
             mpris: this._mpris, lyrics: this._lyrics, focus: this._focus,
-            water: this._water, todo: this._todo, sys: this._sys, notch: this,
-            is24h: () => this._iface.get_string('clock-format') === '24h',
+            water: this._water, todo: this._todo, cal: this._cal, sys: this._sys, notch: this,
+            path: this._ext.path,
+            is24h: () => false, // always AM/PM
             px: n => Math.round(n * this._scale()),
         };
 
         this._mpris.changed.connect(() => this._onMedia());
-        this._focus.changed.connect(() => this._updateCollapsed());
+        this._focus.changed.connect(() => {
+            this._updateCollapsed();
+            this._updateHeader();
+        });
         this._focus.onFinished = (wasFocus) => this._notify({
             icon: 'alarm-symbolic',
             title: wasFocus ? 'Focus session complete' : 'Break is over',
@@ -85,6 +94,13 @@ export class Notch {
                 {label: 'Snooze 5 min', cb: () => this._todo.snooze(t.id, 5)},
             ],
         });
+        this._cal.onDue = (r) => this._notify({
+            icon: 'x-office-calendar-symbolic', title: 'Reminder', sub: r.title,
+            actions: [
+                {label: 'Snooze 10 min', cb: () => this._cal.snooze(r.id, 10)},
+                {label: 'Dismiss', accent: true, cb: () => {}},
+            ],
+        });
         this._sys.onPeek = (icon, text, ms) => {
             if (this._settings.get_boolean('status-peeks')) this.peek(icon, text, ms);
         };
@@ -95,11 +111,13 @@ export class Notch {
 
         this._buildUi();
         this._mpris.start();
+        this._sys.changed.connect(() => this._updateRings());
         this._sys.start();
         this._idle = new IdleWatcher(state => this._setMascot(state));
 
         this._timers.add(10 * 1000, () => {
             this._updateCollapsed();
+            this._updateHeader();
             return true;
         });
     }
@@ -147,8 +165,7 @@ export class Notch {
 
         // collapsed content: [art/play icon] [clock | timer | peek | eyes] [equalizer]
         this._collapsedView = hbox(px(8), {x_expand: true, y_expand: true, style_class: 'nusa-collapsed'});
-        this._leftIcon = makeIcon('audio-x-generic-symbolic', px(14), 'nusa-dim');
-        this._leftIcon.visible = false;
+        this._ring = makeRing(px, 13);
         this._centerLabel = makeLabel('', 'nusa-clock', {ellipsize: false});
         this._centerBox = hbox(px(6), {x_expand: true, x_align: Clutter.ActorAlign.CENTER, y_align: Clutter.ActorAlign.CENTER});
         this._peekIcon = makeIcon('dialog-information-symbolic', px(14));
@@ -159,6 +176,7 @@ export class Notch {
         this._eyes.add_child(this._eyeL);
         this._eyes.add_child(this._eyeR);
         this._eyes.visible = false;
+        this._centerBox.add_child(this._ring.actor);
         this._centerBox.add_child(this._peekIcon);
         this._centerBox.add_child(this._centerLabel);
         this._centerBox.add_child(this._eyes);
@@ -168,16 +186,33 @@ export class Notch {
             this._eq.add_child(bar);
         }
         this._eq.visible = false;
-        this._collapsedView.add_child(this._leftIcon);
         this._collapsedView.add_child(this._centerBox);
         this._collapsedView.add_child(this._eq);
 
-        // expanded content
-        this._expandedView = vbox(0, {x_expand: true, y_expand: true, style_class: 'nusa-expanded', visible: false, opacity: 0});
-        this._pageHolder = new St.Bin({x_expand: true, y_expand: true, x_align: Clutter.ActorAlign.FILL, y_align: Clutter.ActorAlign.FILL});
-        this._bar = hbox(px(2), {x_align: Clutter.ActorAlign.CENTER, style_class: 'nusa-bar'});
-        this._expandedView.add_child(this._pageHolder);
-        this._expandedView.add_child(this._bar);
+        // expanded content: header / page area with < > arrows / page dots
+        this._expandedView = vbox(px(2), {x_expand: true, y_expand: true, style_class: 'nusa-expanded', visible: false, opacity: 0});
+        this._pageHolder = new St.Bin({
+            x_expand: true, y_expand: true, x_align: Clutter.ActorAlign.FILL, y_align: Clutter.ActorAlign.FILL,
+            style: `padding: 0 ${px(30)}px;`,
+        });
+        this._arrowL = iconButton(this._ctx, 'go-previous-symbolic', () => this._step(-1), {size: 14, cls: 'nusa-arrow'});
+        this._arrowR = iconButton(this._ctx, 'go-next-symbolic', () => this._step(1), {size: 14, cls: 'nusa-arrow'});
+        for (const [b, al] of [[this._arrowL, Clutter.ActorAlign.START], [this._arrowR, Clutter.ActorAlign.END]]) {
+            b.x_expand = true;
+            b.y_expand = true;
+            b.x_align = al;
+            b.y_align = Clutter.ActorAlign.CENTER;
+        }
+        this._pageArea = new St.Widget({x_expand: true, y_expand: true, layout_manager: new Clutter.BinLayout()});
+        this._pageArea.add_child(this._pageHolder);
+        this._pageArea.add_child(this._arrowL);
+        this._pageArea.add_child(this._arrowR);
+
+        this._buildHeader();
+        this._dotsBox = hbox(px(5), {x_align: Clutter.ActorAlign.CENTER, style_class: 'nusa-dots'});
+        this._expandedView.add_child(this._header);
+        this._expandedView.add_child(this._pageArea);
+        this._expandedView.add_child(this._dotsBox);
 
         this.actor.add_child(this._collapsedView);
         this.actor.add_child(this._expandedView);
@@ -185,17 +220,20 @@ export class Notch {
         this._pages = [
             new MusicPage(this._ctx), new LyricsPage(this._ctx), new FocusPage(this._ctx),
             new WaterPage(this._ctx), new ShelfPage(this._ctx), new TodoPage(this._ctx),
-            new HeadphonesPage(this._ctx), new ChargingPage(this._ctx),
+            new CalendarPage(this._ctx), new PowerPage(this._ctx), new HardwarePage(this._ctx),
         ];
-        this._barButtons = this._pages.map((p, i) => {
-            const b = iconButton(this._ctx, p.icon, () => this._goto(i), {size: 15, cls: 'nusa-bar-btn'});
-            this._bar.add_child(b);
-            return b;
+        this._dots = [];
+        this._pages.forEach((p, i) => {
+            if (p.hidden) return;
+            const d = new St.Widget({style_class: 'nusa-pdot', y_align: Clutter.ActorAlign.CENTER, reactive: true, track_hover: true});
+            d.set_size(px(6), px(6));
+            d.connect('button-press-event', () => {
+                this._goto(i);
+                return Clutter.EVENT_STOP;
+            });
+            this._dotsBox.add_child(d);
+            this._dots.push([i, d]);
         });
-        this._bar.add_child(iconButton(this._ctx, 'emblem-system-symbolic', () => {
-            this._collapse(true);
-            this._ext.openPreferences();
-        }, {size: 15, cls: 'nusa-bar-btn'}));
 
         this._uiSignals = [
             this.actor.connect('notify::hover', () => this._onHover()),
@@ -226,6 +264,9 @@ export class Notch {
         for (const id of this._uiSignals ?? []) this.actor.disconnect(id);
         for (const p of this._pages ?? []) p.destroy();
         this._pages = null;
+        this._ring = this._hdrRing = this._hdrFocus = null;
+        this._hdrBack = this._hdrGear = null;
+        this._subview = null;
         Main.layoutManager.removeChrome(this.actor);
         this.actor.destroy();
         this.actor = null;
@@ -273,7 +314,7 @@ export class Notch {
             return [Math.round(140 * s), Math.max(3, Math.round(4 * s))];
         let w = BASE_W;
         if (this._peek) w = Math.min(430, Math.max(BASE_W, 76 + this._peek.text.length * 8.6));
-        else if (this._leftIcon.visible || this._eq.visible) w = BASE_W + 30;
+        else if (this._eq.visible) w = BASE_W + 30;
         return [Math.round(w * s), Math.round(BASE_H * s)];
     }
 
@@ -338,6 +379,7 @@ export class Notch {
     _expand() {
         if (this._state === 'expanded') return;
         this._state = 'expanded';
+        this._updateHeader();
         this._timers.clear(this._peekTimer);
         this._peek = null;
         this._collapsedView.visible = false;
@@ -364,6 +406,8 @@ export class Notch {
         this._expandedView.remove_all_transitions();
         this._expandedView.opacity = 0;
         this._expandedView.hide();
+        this._subview?.onBack?.();
+        this.clearSubview();
         this._pages[this._pageIndex].onHide?.();
         const key = global.stage.get_key_focus();
         if (key && this.actor.contains(key)) global.stage.set_key_focus(null);
@@ -408,9 +452,22 @@ export class Notch {
         if (i >= 0) this._goto(i);
     }
 
+    // Next/previous visible page, wrapping around
+    _step(dir) {
+        const n = this._pages.length;
+        let i = this._pageIndex;
+        for (let k = 0; k < n; k++) {
+            i = (i + dir + n) % n;
+            if (!this._pages[i].hidden) break;
+        }
+        this._goto(i);
+    }
+
     _goto(i) {
         if (i < 0 || i >= this._pages.length || i === this._pageIndex) return;
         this._endModal();
+        this._subview?.onBack?.();
+        this.clearSubview();
         if (this._state === 'expanded') this._pages[this._pageIndex].onHide?.();
         this._pageIndex = i;
         this._setPage(i, this._state === 'expanded');
@@ -419,7 +476,14 @@ export class Notch {
     _setPage(i, show) {
         const page = this._pages[i];
         this._pageHolder.set_child(page.actor);
-        this._barButtons.forEach((b, n) => (n === i ? b.add_style_class_name('active') : b.remove_style_class_name('active')));
+        this._setTitle(page);
+        const {px} = this._ctx;
+        for (const [idx, d] of this._dots) {
+            const on = idx === i;
+            d.set_size(on ? px(18) : px(6), px(6));
+            if (on) d.add_style_class_name('active');
+            else d.remove_style_class_name('active');
+        }
         if (show) page.onShow?.();
     }
 
@@ -439,7 +503,7 @@ export class Notch {
         const now = GLib.get_monotonic_time() / 1000;
         if (!step || now - this._scrollAt < 220) return Clutter.EVENT_STOP;
         this._scrollAt = now;
-        this._goto(this._pageIndex + step);
+        this._step(step);
         return Clutter.EVENT_STOP;
     }
 
@@ -453,11 +517,11 @@ export class Notch {
         const focus = global.stage.get_key_focus();
         if (focus instanceof Clutter.Text) return Clutter.EVENT_PROPAGATE;
         if (sym === Clutter.KEY_Left) {
-            this._goto(this._pageIndex - 1);
+            this._step(-1);
             return Clutter.EVENT_STOP;
         }
         if (sym === Clutter.KEY_Right) {
-            this._goto(this._pageIndex + 1);
+            this._step(1);
             return Clutter.EVENT_STOP;
         }
         return Clutter.EVENT_PROPAGATE;
@@ -473,20 +537,125 @@ export class Notch {
     }
 
     _clockText() {
+        return GLib.DateTime.new_now_local().format('%-I:%M %p');
+    }
+
+    _buildHeader() {
+        const px = this._ctx.px;
+        // [page title]        [battery ring · date · time]        [focus level · gear]
+        this._header = new St.Widget({x_expand: true, style_class: 'nusa-header', layout_manager: new Clutter.BinLayout()});
+
+        // back chevron (only inside a sub-view such as Water > Settings) + page title
+        this._hdrBack = iconButton(this._ctx, 'go-previous-symbolic', () => this._subview?.onBack?.(), {size: 14, cls: 'nusa-arrow'});
+        this._hdrBack.visible = false;
+        this._hdrTitle = makeLabel('', 'nusa-hdr-title', {ellipsize: false});
+        const titleBox = hbox(px(8), {x_expand: true, x_align: Clutter.ActorAlign.START, y_align: Clutter.ActorAlign.CENTER});
+        titleBox.add_child(this._hdrBack);
+        titleBox.add_child(this._hdrTitle);
+        this._header.add_child(titleBox);
+
+        const mid = hbox(px(8), {x_expand: true, x_align: Clutter.ActorAlign.CENTER, y_align: Clutter.ActorAlign.CENTER});
+        this._hdrRing = makeRing(px, 16);
+        mid.add_child(this._hdrRing.actor);
+        this._hdrDate = makeLabel('', 'nusa-hdr-date', {ellipsize: false});
+        this._hdrTime = makeLabel('', 'nusa-hdr-time', {ellipsize: false});
+        this._hdrAmPm = makeLabel('', 'nusa-hdr-ampm', {ellipsize: false});
+        this._hdrAmPm.y_align = Clutter.ActorAlign.END;
+        const clock = hbox(px(3), {y_align: Clutter.ActorAlign.CENTER});
+        clock.add_child(this._hdrTime);
+        clock.add_child(this._hdrAmPm);
+        mid.add_child(this._hdrDate);
+        mid.add_child(clock);
+        this._header.add_child(mid);
+
+        const right = hbox(px(8), {x_expand: true, x_align: Clutter.ActorAlign.END, y_align: Clutter.ActorAlign.CENTER});
+        this._hdrFocus = makeRing(px, 20);
+        this._hdrFocus.actor.visible = false;
+        right.add_child(this._hdrFocus.actor);
+        this._hdrGear = iconButton(this._ctx, 'preferences-system-symbolic', () => this.openSettings(), {size: 15, cls: 'nusa-hdr-btn'});
+        right.add_child(this._hdrGear);
+        this._header.add_child(right);
+        this._updateHeader();
+    }
+
+    openSettings() {
+        this._collapse(true);
+        this._ext.openPreferences();
+    }
+
+    // A page can open a sub-view (e.g. Water > Settings): back chevron + its title in the header,
+    // no side arrows or page dots. onBack() must close the sub-view (and call clearSubview()).
+    setSubview(title, onBack) {
+        this._subview = {title, onBack};
+        this._hdrBack.visible = true;
+        this._hdrGear.visible = false;
+        this._arrowL.hide();
+        this._arrowR.hide();
+        this._dotsBox.hide();
+        this._hdrTitle.clutter_text.use_markup = false;
+        this._hdrTitle.text = title;
+    }
+
+    clearSubview() {
+        if (!this._subview) return;
+        this._subview = null;
+        if (!this.actor) return;
+        this._hdrBack.visible = false;
+        this._hdrGear.visible = true;
+        this._arrowL.show();
+        this._arrowR.show();
+        this._dotsBox.show();
+        this._setTitle(this._pages[this._pageIndex]);
+    }
+
+    endModal() {
+        this._endModal();
+    }
+
+    _setTitle(page) {
+        if (page.titleMarkup) this._hdrTitle.clutter_text.set_markup(page.titleMarkup);
+        else {
+            this._hdrTitle.clutter_text.use_markup = false;
+            this._hdrTitle.text = page.title ?? page.name ?? '';
+        }
+    }
+
+    // battery ring (header + closed notch) and the red/teal focus "water" circle
+    _updateRings() {
+        const f = this._focus;
+        const frac = f.total > 0 ? f.remaining / f.total : 1;
+        const active = f.running || f.remaining < f.total;
+        if (this._ring) {
+            if (f.running) this._ring.setFocus(frac, f.mode);
+            else this._ring.setBattery(this._sys.battery);
+        }
+        if (this._hdrRing) this._hdrRing.setBattery(this._sys.battery);
+        if (this._hdrFocus) {
+            this._hdrFocus.actor.visible = active;
+            if (active) this._hdrFocus.setFocus(frac, f.mode);
+        }
+    }
+
+    _updateHeader() {
+        if (!this._hdrDate) return;
         const dt = GLib.DateTime.new_now_local();
-        return dt.format(this._ctx.is24h() ? '%H:%M' : '%-I:%M');
+        this._hdrDate.text = dt.format('%a %-d %b %Y');
+        this._hdrTime.text = dt.format('%-I:%M');
+        this._hdrAmPm.text = dt.format('%p');
+        this._updateRings();
     }
 
     _updateCollapsed() {
         if (!this.actor) return;
         const m = this._mpris;
         const playing = m.playing;
-        this._leftIcon.visible = playing;
         this._eq.visible = playing;
 
         const peek = this._peek;
         const eyes = !peek && this._settings.get_boolean('mascot') && this._mascot !== 'awake';
         this._eyes.visible = eyes;
+        this._ring.actor.visible = !eyes && !peek;
+        this._updateRings();
         this._centerLabel.visible = !eyes;
         this._peekIcon.visible = !!peek;
         if (peek) {
@@ -496,7 +665,7 @@ export class Notch {
         } else {
             this._centerLabel.style_class = 'nusa-clock';
             this._centerLabel.text = this._focus.running
-                ? `${this._focus.mode === 'focus' ? '●' : '☕'} ${fmtTime(this._focus.remaining * 1000)}`
+                ? fmtTime(this._focus.remaining * 1000)
                 : this._clockText();
         }
         if (this._state === 'collapsed') this._applyCollapsed(true);
@@ -554,6 +723,8 @@ export class Notch {
         }
         col.add_child(row);
         this._noticeActor = col;
+        this._arrowL.hide();
+        this._arrowR.hide();
         this._pageHolder.set_child(col);
         this._expand();
         if (this._state === 'expanded' && !this._expandedView.visible) {
@@ -565,6 +736,8 @@ export class Notch {
     _dismissNotice() {
         this._notice = null;
         this._noticeActor = null;
+        this._arrowL.show();
+        this._arrowR.show();
         this._pageHolder.set_child(this._pages[this._pageIndex].actor);
         if (!this.actor.hover) this._onHover();
     }

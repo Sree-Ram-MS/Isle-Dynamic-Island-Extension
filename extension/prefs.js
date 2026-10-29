@@ -35,7 +35,7 @@ export default class NusaNotchPrefs extends ExtensionPreferences {
         sw(look, 'mascot', 'Mascot', 'Show a pair of eyes when the computer is idle');
         sw(look, 'minimal-notch', 'Minimal notch', 'A thin line when closed (for laptops with thick bezels)');
         sw(look, 'hide-in-fullscreen', 'Hide in full screen', 'Step aside for full-screen apps');
-        spin(look, 'notch-scale', 'Notch size', '1.0 is the default size', 0.7, 1.6, 0.05, 2);
+        spin(look, 'notch-scale', 'Notch size', '0.85 is the default size', 0.6, 1.6, 0.05, 2);
         sw(look, 'status-peeks', 'Status peeks', 'Battery, Wi-Fi, headphones and Caps Lock events');
 
         const music = group('Music', 'Playback comes from any MPRIS player (Spotify, browsers, VLC, Rhythmbox, …).');
@@ -49,9 +49,7 @@ export default class NusaNotchPrefs extends ExtensionPreferences {
         spin(water, 'water-goal-ml', 'Daily goal', 'Millilitres', 500, 6000, 100);
         spin(water, 'water-bottle-ml', 'Bottle size', 'Added with each Drink', 50, 2000, 50);
         sw(water, 'water-reminders', 'Reminders', 'Peek in the notch while you are below your goal');
-        spin(water, 'water-start-hour', 'Start hour', '24-hour clock', 0, 23, 1);
-        spin(water, 'water-end-hour', 'End hour', '24-hour clock', 1, 24, 1);
-        spin(water, 'water-interval-min', 'Every', 'Minutes between reminders', 10, 240, 5);
+        spin(water, 'water-interval-min', 'Every', 'Minutes between reminders (reminder hours are set in the notch: Water > Settings)', 5, 240, 5);
 
         const about = group('About');
         about.add(new Adw.ActionRow({
