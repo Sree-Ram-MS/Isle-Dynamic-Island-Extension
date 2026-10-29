@@ -1,0 +1,10 @@
+#!/bin/sh
+# Enable the Nusa Notch GNOME Shell extension for the current user.
+UUID="nusa-notch@linux-clone"
+if gnome-extensions enable "$UUID" 2>/dev/null; then
+    echo "Nusa Notch enabled."
+else
+    echo "GNOME Shell has not discovered the extension yet."
+    echo "Log out and log back in (Wayland needs this once after installing), then run:"
+    echo "    nusa-notch-enable"
+fi

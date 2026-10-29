@@ -1,0 +1,10 @@
+{
+  "uuid": "nusa-notch@linux-clone",
+  "name": "Nusa Notch",
+  "description": "A notch at the top of the screen with music, synced lyrics, focus timer, water reminders, file shelf, to-do list and battery/headphone peeks. Unofficial Linux clone inspired by Nusa for Windows.",
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "settings-schema": "org.gnome.shell.extensions.nusa-notch",
+  "gettext-domain": "nusa-notch",
+  "version": 2,
+  "version-name": "1.0.1"
+}

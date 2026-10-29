@@ -1,0 +1,44 @@
+.nusa-notch { background-color: #000; border-radius: 0 0 22px 22px; color: #f2f2f2; }
+.nusa-notch.minimal { border-radius: 0 0 4px 4px; background-color: #1c1c1e; }
+.nusa-collapsed { padding: 0 14px; spacing: 8px; }
+.nusa-clock { font-weight: 600; color: #f2f2f2; }
+.nusa-peek-text { font-weight: 600; }
+.nusa-eye { background-color: #fff; border-radius: 10px; }
+.nusa-eye.doze { border-radius: 2px; }
+.nusa-eq { background-color: #ffb454; border-radius: 1px; width: 3px; }
+.nusa-expanded { padding: 10px 16px 6px 16px; spacing: 4px; }
+.nusa-bar { spacing: 6px; padding-top: 2px; }
+.nusa-bar-btn { padding: 4px 8px; border-radius: 10px; color: #8e8e93; }
+.nusa-bar-btn:hover { background-color: rgba(255,255,255,0.10); color: #fff; }
+.nusa-bar-btn.active { color: #ffb454; background-color: rgba(255,180,84,0.14); }
+.nusa-title { font-weight: 700; font-size: 1.15em; color: #fff; }
+.nusa-sub { color: #a1a1a6; }
+.nusa-dim { color: #8e8e93; font-size: 0.85em; }
+.nusa-big { font-weight: 700; font-size: 2.6em; color: #fff; }
+.nusa-art { border-radius: 12px; background-color: #1c1c1e; }
+.nusa-ctl { padding: 6px 10px; border-radius: 12px; color: #fff; }
+.nusa-ctl:hover { background-color: rgba(255,255,255,0.12); }
+.nusa-ctl:active { background-color: rgba(255,255,255,0.22); }
+.nusa-pill { padding: 5px 14px; border-radius: 14px; background-color: rgba(255,255,255,0.12); color: #fff; font-weight: 600; }
+.nusa-pill:hover { background-color: rgba(255,255,255,0.22); }
+.nusa-pill.accent { background-color: #ffb454; color: #000; }
+.nusa-pill.accent:hover { background-color: #ffc47a; }
+.nusa-track { background-color: rgba(255,255,255,0.18); border-radius: 3px; height: 5px; }
+.nusa-fill { background-color: #ffb454; border-radius: 3px; height: 5px; }
+.nusa-fill.water { background-color: #4fb7ff; }
+.nusa-slider { -barrier-threshold: 0; -slider-height: 5px; -slider-background-color: rgba(255,255,255,0.18); -slider-active-background-color: #ffb454; -slider-handle-radius: 6px; color: #fff; height: 14px; }
+.nusa-lyric { color: #6e6e73; padding: 1px 4px; border-radius: 6px; }
+.nusa-lyric:hover { background-color: rgba(255,255,255,0.08); }
+.nusa-lyric.near { color: #a1a1a6; }
+.nusa-lyric.current { color: #fff; font-weight: 700; font-size: 1.12em; }
+.nusa-card { background-color: #1c1c1e; border-radius: 12px; padding: 8px; width: 104px; spacing: 4px; }
+.nusa-card.selected { border: 1px solid #ffb454; }
+.nusa-card-text { font-size: 0.8em; color: #d1d1d6; }
+.nusa-task { padding: 3px 4px; border-radius: 8px; spacing: 8px; }
+.nusa-task:hover { background-color: rgba(255,255,255,0.07); }
+.nusa-dot { width: 10px; height: 10px; border-radius: 5px; }
+.nusa-entry { background-color: #1c1c1e; border-radius: 10px; color: #fff; padding: 4px 8px; caret-color: #ffb454; selection-background-color: #ffb454; selected-color: #000; }
+.nusa-entry:focus { border: 1px solid #ffb454; }
+.nusa-bar-col { background-color: #4fb7ff; border-radius: 3px; width: 14px; }
+.nusa-bar-col.today { background-color: #ffb454; }
+.nusa-alert { spacing: 6px; }

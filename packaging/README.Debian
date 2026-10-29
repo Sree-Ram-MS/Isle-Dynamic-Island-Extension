@@ -1,0 +1,11 @@
+Nusa Notch for Ubuntu (unofficial clone)
+========================================
+After installing:
+  1. Log out and log back in (needed once on Wayland so GNOME Shell sees the new extension).
+  2. Run:  nusa-notch-enable      (or turn it on in the Extensions app)
+
+Settings: click the gear at the right end of the notch's page bar, or run
+  gnome-extensions prefs nusa-notch@linux-clone
+
+Uninstall: sudo apt remove nusa-notch
+User data lives in ~/.local/share/nusa-notch (delete it to reset tasks/water/shelf).

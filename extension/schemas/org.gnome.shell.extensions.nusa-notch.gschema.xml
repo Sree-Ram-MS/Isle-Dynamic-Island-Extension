@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.nusa-notch" path="/org/gnome/shell/extensions/nusa-notch/">
+    <key name="mascot" type="b"><default>true</default><summary>Show the idle mascot (eyes)</summary></key>
+    <key name="minimal-notch" type="b"><default>false</default><summary>Minimal notch (thin line when closed)</summary></key>
+    <key name="hide-in-fullscreen" type="b"><default>true</default><summary>Step aside for full-screen apps</summary></key>
+    <key name="notch-scale" type="d"><range min="0.7" max="1.6"/><default>1.0</default><summary>Notch size</summary></key>
+    <key name="lyrics-enabled" type="b"><default>true</default><summary>Fetch synced lyrics from LRCLIB</summary></key>
+    <key name="focus-minutes" type="i"><range min="1" max="180"/><default>25</default><summary>Focus length in minutes</summary></key>
+    <key name="break-minutes" type="i"><range min="1" max="60"/><default>5</default><summary>Break length in minutes</summary></key>
+    <key name="water-goal-ml" type="i"><range min="500" max="6000"/><default>1500</default><summary>Daily water goal (ml)</summary></key>
+    <key name="water-bottle-ml" type="i"><range min="50" max="2000"/><default>250</default><summary>Amount per drink (ml)</summary></key>
+    <key name="water-reminders" type="b"><default>true</default><summary>Water reminders</summary></key>
+    <key name="water-start-hour" type="i"><range min="0" max="23"/><default>9</default><summary>Reminders start hour</summary></key>
+    <key name="water-end-hour" type="i"><range min="1" max="24"/><default>21</default><summary>Reminders end hour</summary></key>
+    <key name="water-interval-min" type="i"><range min="10" max="240"/><default>60</default><summary>Minutes between reminders</summary></key>
+    <key name="status-peeks" type="b"><default>true</default><summary>Peek for battery, Wi-Fi, headphones and Caps Lock</summary></key>
+  </schema>
+</schemalist>
