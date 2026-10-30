@@ -2,13 +2,24 @@
 
 Unofficial Ubuntu/GNOME clone of the Nusa notch app: a notch at the top of the screen with
 music, synced lyrics, focus timer, water reminders, file/text shelf, to-do, calendar reminders,
-battery/headphones, a hardware monitor and status peeks.
+wallpaper switching, battery/headphones, a hardware monitor and status peeks.
 Built as a GNOME Shell extension (GNOME 45–50, tested target: Ubuntu 26.04 / GNOME 50).
+
+## Highlights (v1.6.1)
+- Hover the page dots for a **page icon bar**; page changes **slide** smoothly.
+- **Lyrics pill** on the Lyrics page, and closing the notch from Lyrics puts the
+  **current lyric line in the minimized notch** (it widens to fit the line).
+- **Wallpapers page**: tap a thumbnail (from `~/Pictures` or `/usr/share/backgrounds`)
+  to apply it. Thumbnails load asynchronously at thumbnail size, so the page stays light.
+- **Settings → Pages**: choose which pages appear in the notch.
+- Battery ring: **blue when fully charged, red when low**, with a centred bolt while charging.
+- Synced lyrics come from [LRCLIB](https://lrclib.net) — free, no account or API key;
+  only the song's title, artist, album and length are sent.
 
 ## Layout
 - `extension/extension.js`   entry point (enable/disable)
 - `extension/notch.js`       notch window, expand/collapse, paging, alerts, mascot
-- `extension/pages/*.js`     one file per page (music, lyrics, focus, water, shelf, todo, calendar, power, hardware)
+- `extension/pages/*.js`     one file per page (music, lyrics, focus, water, shelf, todo, calendar, wallpaper, power, hardware)
 - `extension/lib/*.js`       MPRIS watcher, LRCLIB client, services (timer, water, todo, battery, Wi-Fi, Bluetooth, idle), storage, UI helpers
 - `extension/stylesheet.css` colours, sizes, accent (`#ffb454`)
 - `extension/schemas/`       settings keys; `extension/prefs.js` is the settings window

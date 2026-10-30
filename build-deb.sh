@@ -2,7 +2,7 @@
 # Usage: ./build-deb.sh   ->  dist/nusa-notch_<version>_all.deb
 set -e
 cd "$(dirname "$0")"
-VERSION=1.5.1
+VERSION=1.6.1
 UUID=nusa-notch@linux-clone
 STAGE=$(mktemp -d)
 EXT="$STAGE/usr/share/gnome-shell/extensions/$UUID"
@@ -41,5 +41,5 @@ C
 find "$STAGE" -type d -exec chmod 755 {} +
 find "$EXT" -type f -exec chmod 644 {} +
 mkdir -p dist
-dpkg-deb --root-owner-group --build "$STAGE" "dist/nusa-notch_${VERSION}_all.deb"
+dpkg-deb -Zgzip --root-owner-group --build "$STAGE" "dist/nusa-notch_${VERSION}_all.deb"
 rm -rf "$STAGE"

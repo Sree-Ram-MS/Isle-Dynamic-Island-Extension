@@ -67,10 +67,12 @@ export class MusicPage {
         seekRow.add_child(this._seek);
         seekRow.add_child(this._total);
 
-        // volume slider (hidden until the speaker button is clicked)
+        // small volume slider, shown in the control row between the forward
+        // button and the speaker icon (hidden until the speaker is clicked)
         this._vol = new Slider(1);
         this._vol.add_style_class_name('nusa-slider');
-        this._vol.x_expand = true;
+        this._vol.set_width(px(72));
+        this._vol.y_align = Clutter.ActorAlign.CENTER;
         this._vol.connect('drag-begin', () => { this._volDragging = true; });
         this._vol.connect('drag-end', () => { this._volDragging = false; });
         this._vol.connect('notify::value', () => {
@@ -78,7 +80,7 @@ export class MusicPage {
             if (this._volDragging) this._sysvol.set(this._vol.value);
         });
         this._vol.connect('scroll-event', (_a, ev) => this._onVolScroll(ev));
-        this._volRow = hbox(px(8), {x_expand: true, visible: false});
+        this._volRow = hbox(px(6), {visible: false, y_align: Clutter.ActorAlign.CENTER});
         this._volRow.add_child(this._vol);
 
         // bottom row: [chat]   [rewind play forward]   [speaker]
@@ -96,18 +98,22 @@ export class MusicPage {
         }, {size: 16});
         this._volBtn.connect('scroll-event', (_a, ev) => this._onVolScroll(ev));
 
+        // [chat]   [rewind play forward]   [volume slider + speaker]
+        const volGroup = hbox(px(6), {y_align: Clutter.ActorAlign.CENTER});
+        volGroup.add_child(this._volRow);
+        volGroup.add_child(this._volBtn);
+
         const ctlRow = hbox(px(6), {x_expand: true});
         ctlRow.add_child(chatBtn);
         ctlRow.add_child(spacer());
         ctlRow.add_child(controls);
         ctlRow.add_child(spacer());
-        ctlRow.add_child(this._volBtn);
+        ctlRow.add_child(volGroup);
 
         const col = vbox(px(2), {x_expand: true, y_align: Clutter.ActorAlign.CENTER});
         col.add_child(this._title);
         col.add_child(this._artist);
         col.add_child(seekRow);
-        col.add_child(this._volRow);
         col.add_child(ctlRow);
 
         this._player = hbox(px(14), {x_expand: true, y_expand: true});

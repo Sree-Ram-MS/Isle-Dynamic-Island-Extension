@@ -1,6 +1,7 @@
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import Pango from 'gi://Pango';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
 
@@ -21,6 +22,7 @@ import {WaterPage} from './pages/water.js';
 import {ShelfPage} from './pages/shelf.js';
 import {TodoPage} from './pages/todo.js';
 import {CalendarPage} from './pages/calendar.js';
+import {WallpaperPage} from './pages/wallpaper.js';
 import {PowerPage} from './pages/power.js';
 import {HardwarePage} from './pages/hardware.js';
 
@@ -44,6 +46,11 @@ export class Notch {
         this._scrollAt = 0;
         this._signals = [];
         this._subview = null;
+        this._dotsTimer = 0;
+        this._pageBarOn = false;
+        this._eqTimer = 0;
+        this._miniLyrics = false;
+        this._miniLyricText = '';
     }
 
     // ------------------------------------------------------------ lifecycle
@@ -166,6 +173,8 @@ export class Notch {
         // collapsed content: [art/play icon] [clock | timer | peek | eyes] [equalizer]
         this._collapsedView = hbox(px(8), {x_expand: true, y_expand: true, style_class: 'nusa-collapsed'});
         this._ring = makeRing(px, 13);
+        this._miniNote = makeLabel('♪', 'nusa-mini-note', {ellipsize: false});
+        this._miniNote.visible = false;
         this._centerLabel = makeLabel('', 'nusa-clock', {ellipsize: false});
         this._centerBox = hbox(px(6), {x_expand: true, x_align: Clutter.ActorAlign.CENTER, y_align: Clutter.ActorAlign.CENTER});
         this._peekIcon = makeIcon('dialog-information-symbolic', px(14));
@@ -178,12 +187,16 @@ export class Notch {
         this._eyes.visible = false;
         this._centerBox.add_child(this._ring.actor);
         this._centerBox.add_child(this._peekIcon);
+        this._centerBox.add_child(this._miniNote);
         this._centerBox.add_child(this._centerLabel);
         this._centerBox.add_child(this._eyes);
         this._eq = hbox(px(2), {y_align: Clutter.ActorAlign.CENTER});
-        for (const h of [6, 11, 8]) {
+        this._eqBase = [6, 11, 8, 12, 5];
+        this._eqBars = [];
+        for (const h of this._eqBase) {
             const bar = new St.Widget({style_class: 'nusa-eq', height: px(h), y_align: Clutter.ActorAlign.CENTER});
             this._eq.add_child(bar);
+            this._eqBars.push(bar);
         }
         this._eq.visible = false;
         this._collapsedView.add_child(this._centerBox);
@@ -209,10 +222,22 @@ export class Notch {
         this._pageArea.add_child(this._arrowR);
 
         this._buildHeader();
-        this._dotsBox = hbox(px(5), {x_align: Clutter.ActorAlign.CENTER, style_class: 'nusa-dots'});
+        // footer: the page dots. Hovering the footer swaps the dots for a page
+        // icon bar (one icon per page, click to jump); moving away restores them.
+        // The footer has a fixed height so the swap never resizes the notch.
+        this._dotsBox = hbox(px(5), {x_align: Clutter.ActorAlign.CENTER, y_align: Clutter.ActorAlign.CENTER, style_class: 'nusa-dots'});
+        this._pageBar = hbox(px(2), {x_align: Clutter.ActorAlign.CENTER, y_align: Clutter.ActorAlign.CENTER, style_class: 'nusa-pagebar', visible: false, opacity: 0});
+        this._footer = new St.Widget({
+            x_expand: true, reactive: true, track_hover: true,
+            layout_manager: new Clutter.BinLayout(), style_class: 'nusa-footer',
+        });
+        this._footer.set_height(px(24));
+        this._footer.add_child(this._dotsBox);
+        this._footer.add_child(this._pageBar);
+        this._footer.connect('notify::hover', () => this._onFooterHover());
         this._expandedView.add_child(this._header);
         this._expandedView.add_child(this._pageArea);
-        this._expandedView.add_child(this._dotsBox);
+        this._expandedView.add_child(this._footer);
 
         this.actor.add_child(this._collapsedView);
         this.actor.add_child(this._expandedView);
@@ -220,9 +245,20 @@ export class Notch {
         this._pages = [
             new MusicPage(this._ctx), new LyricsPage(this._ctx), new FocusPage(this._ctx),
             new WaterPage(this._ctx), new ShelfPage(this._ctx), new TodoPage(this._ctx),
-            new CalendarPage(this._ctx), new PowerPage(this._ctx), new HardwarePage(this._ctx),
+            new CalendarPage(this._ctx), new WallpaperPage(this._ctx), new PowerPage(this._ctx), new HardwarePage(this._ctx),
         ];
+        // Settings > Pages decides which pages appear in the dots / icon bar.
+        // Lyrics is hidden from the list by default and stays reachable from
+        // the Music page's lyrics button either way.
+        for (const p of this._pages)
+            p.hidden = !this._settings.get_boolean(`show-page-${p.id}`);
+        if (!this._pages.some(p => !p.hidden)) this._pages[0].hidden = false;
+        if (this._pages[this._pageIndex]?.hidden) {
+            const first = this._pages.findIndex(p => !p.hidden);
+            if (first >= 0) this._pageIndex = first;
+        }
         this._dots = [];
+        this._pageIcons = [];
         this._pages.forEach((p, i) => {
             if (p.hidden) return;
             const d = new St.Widget({style_class: 'nusa-pdot', y_align: Clutter.ActorAlign.CENTER, reactive: true, track_hover: true});
@@ -233,6 +269,9 @@ export class Notch {
             });
             this._dotsBox.add_child(d);
             this._dots.push([i, d]);
+            const b = iconButton(this._ctx, p.icon, () => this._goto(i), {size: 15, cls: 'nusa-picon'});
+            this._pageBar.add_child(b);
+            this._pageIcons.push([i, b]);
         });
 
         this._uiSignals = [
@@ -261,6 +300,16 @@ export class Notch {
         this._timers?.clear(this._hoverTimer);
         this._timers?.clear(this._collapseTimer);
         this._timers?.clear(this._peekTimer);
+        this._timers?.clear(this._dotsTimer);
+        this._dotsTimer = 0;
+        this._pageBarOn = false;
+        this._pageIcons = null;
+        this._timers?.clear(this._eqTimer);
+        this._eqTimer = 0;
+        this._eqBars = null;
+        this._trans = null;
+        this._miniLyrics = false;
+        this._miniLyricText = '';
         for (const id of this._uiSignals ?? []) this.actor.disconnect(id);
         for (const p of this._pages ?? []) p.destroy();
         this._pages = null;
@@ -281,6 +330,10 @@ export class Notch {
     }
 
     _onSetting(key) {
+        if (key.startsWith('show-page-')) {
+            this._rebuildUi();
+            return;
+        }
         switch (key) {
         case 'notch-scale':
         case 'minimal-notch':
@@ -300,6 +353,7 @@ export class Notch {
             this._water.changed.emit();
             break;
         case 'lyrics-enabled':
+            if (!this._settings.get_boolean('lyrics-enabled')) this._setMiniLyrics(false);
             this._pages?.[1]?.refresh();
             break;
         default:
@@ -314,7 +368,13 @@ export class Notch {
             return [Math.round(140 * s), Math.max(3, Math.round(4 * s))];
         let w = BASE_W;
         if (this._peek) w = Math.min(430, Math.max(BASE_W, 76 + this._peek.text.length * 8.6));
-        else if (this._eq.visible) w = BASE_W + 30;
+        else if (this._miniLyrics && this._miniLyricText) {
+            // Only the lyric mode changes the normal collapsed width: fit the
+            // ♪ + current line, leaving room for the equalizer when playing.
+            const chars = Array.from(this._miniLyricText).length;
+            w = Math.min(560, Math.max(BASE_W, 76 + chars * 8.6 + (this._eq.visible ? 38 : 0)));
+        }
+        else if (this._eq.visible) w = BASE_W + 36;
         return [Math.round(w * s), Math.round(BASE_H * s)];
     }
 
@@ -403,12 +463,20 @@ export class Notch {
         if (!force && (this._pinned || this._grab || this._notice)) return;
         this._endModal();
         this._state = 'collapsed';
+        this._finishTransition();
+        this._timers.clear(this._dotsTimer);
+        this._dotsTimer = 0;
+        this._showPageBar(false);
         this._expandedView.remove_all_transitions();
         this._expandedView.opacity = 0;
         this._expandedView.hide();
         this._subview?.onBack?.();
         this.clearSubview();
-        this._pages[this._pageIndex].onHide?.();
+        const closingPage = this._pages[this._pageIndex];
+        closingPage.onHide?.();
+        // Closing from the Lyrics page arms the minimized lyric display;
+        // closing from any other page turns it off again.
+        this._setMiniLyrics(closingPage.id === 'lyrics' && closingPage.canMini?.());
         const key = global.stage.get_key_focus();
         if (key && this.actor.contains(key)) global.stage.set_key_focus(null);
         this._applyCollapsed(true);
@@ -460,23 +528,60 @@ export class Notch {
             i = (i + dir + n) % n;
             if (!this._pages[i].hidden) break;
         }
-        this._goto(i);
+        this._goto(i, dir);
     }
 
-    _goto(i) {
+    _goto(i, dirHint = 0) {
         if (i < 0 || i >= this._pages.length || i === this._pageIndex) return;
         this._endModal();
         this._subview?.onBack?.();
         this.clearSubview();
-        if (this._state === 'expanded') this._pages[this._pageIndex].onHide?.();
+        const dir = dirHint || Math.sign(i - this._pageIndex) || 1;
+        const oldPage = this._pages[this._pageIndex];
+        if (this._state === 'expanded') oldPage.onHide?.();
         this._pageIndex = i;
-        this._setPage(i, this._state === 'expanded');
+        if (this._state === 'expanded' && !this._notice) this._transitionTo(i, oldPage, dir);
+        else this._setPage(i, this._state === 'expanded');
     }
 
-    _setPage(i, show) {
+    // Smooth slide: the new page slides in from the swipe direction while the
+    // old one slides out, instead of the page swapping instantly.
+    _transitionTo(i, oldPage, dir) {
         const page = this._pages[i];
-        this._pageHolder.set_child(page.actor);
+        this._finishTransition();
         this._setTitle(page);
+        this._updatePageChrome(i);
+        const w = Math.max(120, this._pageHolder.width);
+        const oldActor = oldPage.actor;
+        const newActor = page.actor;
+        newActor.translation_x = dir * w;
+        oldActor.translation_x = 0;
+        this._pageHolder.add_child(newActor);
+        this._trans = {oldActor, newActor};
+        page.onShow?.();
+        newActor.ease({
+            translation_x: 0, duration: 230, mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+            onComplete: () => this._finishTransition(),
+        });
+        oldActor.ease({
+            translation_x: -dir * w, duration: 230, mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+        });
+    }
+
+    // Settle any in-flight slide instantly (rapid swipes, collapse, sub-views…)
+    _finishTransition() {
+        if (!this._trans) return;
+        const {oldActor, newActor} = this._trans;
+        this._trans = null;
+        for (const a of [oldActor, newActor]) {
+            a.remove_all_transitions();
+            a.translation_x = 0;
+        }
+        if (oldActor.get_parent() === this._pageHolder && oldActor !== newActor)
+            this._pageHolder.remove_child(oldActor);
+    }
+
+    _updatePageChrome(i) {
         const {px} = this._ctx;
         for (const [idx, d] of this._dots) {
             const on = idx === i;
@@ -484,7 +589,60 @@ export class Notch {
             if (on) d.add_style_class_name('active');
             else d.remove_style_class_name('active');
         }
+        for (const [idx, b] of this._pageIcons ?? []) {
+            if (idx === i) b.add_style_class_name('active');
+            else b.remove_style_class_name('active');
+        }
+    }
+
+    _setPage(i, show) {
+        const page = this._pages[i];
+        this._finishTransition();
+        page.actor.translation_x = 0;
+        this._pageHolder.set_child(page.actor);
+        this._setTitle(page);
+        this._updatePageChrome(i);
         if (show) page.onShow?.();
+    }
+
+    // Hovering the footer for a beat replaces the dots with the page icon bar;
+    // leaving the footer brings the dots back after a short delay.
+    _onFooterHover() {
+        if (!this._footer || this._subview) return;
+        this._timers.clear(this._dotsTimer);
+        if (this._footer.hover) {
+            this._dotsTimer = this._timers.add(250, () => {
+                this._dotsTimer = 0;
+                if (this._footer?.hover && !this._subview) this._showPageBar(true);
+                return false;
+            });
+        } else {
+            this._dotsTimer = this._timers.add(300, () => {
+                this._dotsTimer = 0;
+                if (!this._footer?.hover) this._showPageBar(false);
+                return false;
+            });
+        }
+    }
+
+    _showPageBar(on) {
+        if (!this._pageBar || on === this._pageBarOn) return;
+        this._pageBarOn = on;
+        this._pageBar.remove_all_transitions();
+        this._dotsBox.remove_all_transitions();
+        if (on) {
+            this._pageBar.show();
+            this._pageBar.ease({opacity: 255, duration: 150});
+            this._dotsBox.ease({opacity: 0, duration: 120, onComplete: () => {
+                if (this._pageBarOn) this._dotsBox.hide();
+            }});
+        } else {
+            this._dotsBox.show();
+            this._dotsBox.ease({opacity: 255, duration: 150});
+            this._pageBar.ease({opacity: 0, duration: 120, onComplete: () => {
+                if (!this._pageBarOn) this._pageBar.hide();
+            }});
+        }
     }
 
     _onScroll(ev) {
@@ -529,11 +687,43 @@ export class Notch {
 
     // ------------------------------------------------------------ collapsed view
     _onMedia() {
-        this._updateCollapsed();
+        if (this._miniLyrics && !this._mpris.track) this._setMiniLyrics(false);
         if (this._state === 'expanded') {
             this._pages[0].refresh();
             this._pages[1].refresh();
+        } else if (this._miniLyrics) {
+            this._pages[1].refresh();
         }
+        this._updateCollapsed();
+    }
+
+    // ---- minimized lyrics ---------------------------------------------------
+    _lyricsPage() {
+        return this._pages?.find(p => p.id === 'lyrics') ?? null;
+    }
+
+    _setMiniLyrics(active) {
+        const page = this._lyricsPage();
+        if (!page) {
+            this._miniLyrics = false;
+            this._miniLyricText = '';
+            return;
+        }
+        if (active === this._miniLyrics) {
+            if (active) page.setMiniActive(true);
+            return;
+        }
+        this._miniLyrics = !!active;
+        if (!this._miniLyrics) this._miniLyricText = '';
+        page.setMiniActive(this._miniLyrics);
+        if (this._state === 'collapsed') this._updateCollapsed();
+    }
+
+    setMiniLyric(text) {
+        const next = (text ?? '').trim();
+        if (next === this._miniLyricText) return;
+        this._miniLyricText = next;
+        if (this._state === 'collapsed') this._updateCollapsed();
     }
 
     _clockText() {
@@ -591,7 +781,10 @@ export class Notch {
         this._hdrGear.visible = false;
         this._arrowL.hide();
         this._arrowR.hide();
-        this._dotsBox.hide();
+        this._timers.clear(this._dotsTimer);
+        this._dotsTimer = 0;
+        this._showPageBar(false);
+        this._footer.hide();
         this._hdrTitle.clutter_text.use_markup = false;
         this._hdrTitle.text = title;
     }
@@ -604,7 +797,7 @@ export class Notch {
         this._hdrGear.visible = true;
         this._arrowL.show();
         this._arrowR.show();
-        this._dotsBox.show();
+        this._footer.show();
         this._setTitle(this._pages[this._pageIndex]);
     }
 
@@ -650,18 +843,25 @@ export class Notch {
         const m = this._mpris;
         const playing = m.playing;
         this._eq.visible = playing;
+        this._syncEqAnim(playing);
 
         const peek = this._peek;
-        const eyes = !peek && this._settings.get_boolean('mascot') && this._mascot !== 'awake';
+        const mini = !peek && this._miniLyrics && !!this._miniLyricText;
+        const eyes = !peek && !mini && this._settings.get_boolean('mascot') && this._mascot !== 'awake';
         this._eyes.visible = eyes;
-        this._ring.actor.visible = !eyes && !peek;
+        this._ring.actor.visible = !eyes && !peek && !mini;
         this._updateRings();
         this._centerLabel.visible = !eyes;
         this._peekIcon.visible = !!peek;
+        this._miniNote.visible = mini;
+        this._centerLabel.clutter_text.ellipsize = mini ? Pango.EllipsizeMode.END : Pango.EllipsizeMode.NONE;
         if (peek) {
             this._peekIcon.icon_name = peek.icon;
             this._centerLabel.text = peek.text;
             this._centerLabel.style_class = 'nusa-peek-text';
+        } else if (mini) {
+            this._centerLabel.style_class = 'nusa-mini-lyric';
+            this._centerLabel.text = this._miniLyricText;
         } else {
             this._centerLabel.style_class = 'nusa-clock';
             this._centerLabel.text = this._focus.running
@@ -669,6 +869,33 @@ export class Notch {
                 : this._clockText();
         }
         if (this._state === 'collapsed') this._applyCollapsed(true);
+    }
+
+    // The sound-wave bars dance while music is playing; they rest at their
+    // base heights when playback stops.
+    _syncEqAnim(playing) {
+        if (playing && !this._eqTimer) {
+            this._eqTimer = this._timers.add(170, () => {
+                if (!this._eqBars || !this._ctx) return false;
+                const px = this._ctx.px;
+                for (const bar of this._eqBars) {
+                    bar.remove_all_transitions();
+                    bar.ease({
+                        height: px(3 + Math.round(Math.random() * 10)),
+                        duration: 160, mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+                    });
+                }
+                return true;
+            });
+        } else if (!playing && this._eqTimer) {
+            this._timers.clear(this._eqTimer);
+            this._eqTimer = 0;
+            const px = this._ctx.px;
+            (this._eqBars ?? []).forEach((bar, i) => {
+                bar.remove_all_transitions();
+                bar.set_height(px(this._eqBase[i]));
+            });
+        }
     }
 
     _setMascot(state) {
@@ -738,7 +965,10 @@ export class Notch {
         this._noticeActor = null;
         this._arrowL.show();
         this._arrowR.show();
-        this._pageHolder.set_child(this._pages[this._pageIndex].actor);
+        this._finishTransition();
+        const a = this._pages[this._pageIndex].actor;
+        a.translation_x = 0;
+        this._pageHolder.set_child(a);
         if (!this.actor.hover) this._onHover();
     }
 }

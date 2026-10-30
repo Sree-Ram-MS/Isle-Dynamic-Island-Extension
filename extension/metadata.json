@@ -5,6 +5,6 @@
   "shell-version": ["45", "46", "47", "48", "49", "50"],
   "settings-schema": "org.gnome.shell.extensions.nusa-notch",
   "gettext-domain": "nusa-notch",
-  "version": 8,
-  "version-name": "1.5.1"
+  "version": 10,
+  "version-name": "1.6.1"
 }

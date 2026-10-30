@@ -2,6 +2,8 @@
 .nusa-notch.minimal { border-radius: 0 0 4px 4px; background-color: #1c1c1e; }
 .nusa-collapsed { padding: 0 14px; spacing: 8px; }
 .nusa-clock { font-weight: 600; color: #f2f2f2; }
+.nusa-mini-note { color: #ffb454; font-weight: 800; }
+.nusa-mini-lyric { color: #fff; font-weight: 700; }
 .nusa-peek-text { font-weight: 600; }
 .nusa-eye { background-color: #fff; border-radius: 10px; }
 .nusa-eye.doze { border-radius: 2px; }
@@ -21,6 +23,9 @@
 .nusa-pdot { background-color: rgba(255,255,255,0.28); border-radius: 9px; }
 .nusa-pdot:hover { background-color: rgba(255,255,255,0.5); }
 .nusa-pdot.active { background-color: #fff; }
+.nusa-picon { padding: 3px 7px; border-radius: 9px; color: #8e8e93; }
+.nusa-picon:hover { background-color: rgba(255,255,255,0.10); color: #fff; }
+.nusa-picon.active { color: #ffb454; background-color: rgba(255,180,84,0.14); }
 .nusa-title { font-weight: 700; font-size: 1.15em; color: #fff; }
 .nusa-sub { color: #a1a1a6; }
 .nusa-dim { color: #8e8e93; font-size: 0.85em; }
@@ -37,6 +42,9 @@
 .nusa-fill { background-color: #ffb454; border-radius: 3px; height: 5px; }
 .nusa-fill.water { background-color: #4fb7ff; }
 .nusa-slider { -barrier-threshold: 0; -slider-height: 5px; -slider-background-color: rgba(255,255,255,0.18); -slider-active-background-color: #ffb454; -slider-handle-radius: 6px; color: #fff; height: 14px; }
+.nusa-lyric-pill { background-gradient-direction: vertical; background-gradient-start: #57121b; background-gradient-end: #170409; border-radius: 99px; padding: 7px 16px; }
+.nusa-lyric-pill-note { color: #ffb454; font-weight: 700; font-size: 1.1em; }
+.nusa-lyric-pill-text { color: #fff; font-weight: 700; }
 .nusa-lyric { color: #6e6e73; padding: 1px 4px; border-radius: 6px; }
 .nusa-lyric:hover { background-color: rgba(255,255,255,0.08); }
 .nusa-lyric.near { color: #a1a1a6; }
@@ -131,8 +139,15 @@
 .nusa-htrack { background-color: rgba(255,255,255,0.14); border-radius: 99px; }
 .nusa-hfill { border-radius: 99px; }
 .nusa-pcard { background-color: rgba(255,255,255,0.07); border-radius: 16px; padding: 8px 12px; }
+.nusa-splitline { background-color: rgba(255,255,255,0.16); }
+.nusa-bolt { color: #ffb454; font-size: 1.2em; background-color: #101014; padding: 3px 4px; border-radius: 99px; }
 .nusa-ptitle { color: #fff; font-weight: 800; font-size: 1.6em; }
 .nusa-ptitle.dim { color: #8e8e93; font-size: 1.1em; }
+/* wallpapers */
+.nusa-wpcard { border-radius: 10px; padding: 2px; }
+.nusa-wpcard:hover { background-color: rgba(255,255,255,0.12); }
+.nusa-wpcard.sel { border: 2px solid #ffb454; padding: 0; }
+.nusa-wpthumb { border-radius: 8px; background-color: #1c1c1e; }
 /* calendar */
 .nusa-cmonth { color: #ff453a; font-weight: 700; font-size: 0.78em; }
 .nusa-cweekday { color: #ff453a; font-weight: 800; font-size: 1.15em; }

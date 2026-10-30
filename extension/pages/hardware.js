@@ -80,7 +80,7 @@ export class HardwarePage {
         this._t.gpu.val.text = hw.gpu === null ? 'N/A' : `${hw.gpu}%`;
         this._t.up.val.text = fmtRate(hw.up);
         this._t.down.val.text = fmtRate(hw.down);
-        this._t.disk.val.text = `${hw.disk}%`;
+        this._t.disk.val.text = hw.diskTotal ? `${hw.disk}% · ${gb(hw.diskUsed)} / ${gb(hw.diskTotal)} GB` : `${hw.disk}%`;
         this._bar(this._t.cpu, hw.cpu);
         this._bar(this._t.ram, hw.ramTotal ? (100 * hw.ramUsed) / hw.ramTotal : 0);
         this._bar(this._t.gpu, hw.gpu ?? 0);

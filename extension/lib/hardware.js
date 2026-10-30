@@ -14,10 +14,11 @@ function readText(path) {
     }
 }
 
-export function fmtRate(bitsPerSec) {
-    if (bitsPerSec >= 1e9) return `${(bitsPerSec / 1e9).toFixed(1)} Gbps`;
-    if (bitsPerSec >= 1e6) return `${(bitsPerSec / 1e6).toFixed(1)} Mbps`;
-    return `${Math.round(bitsPerSec / 1e3)} Kbps`;
+export function fmtRate(bytesPerSec) {
+    if (bytesPerSec >= 1e9) return `${(bytesPerSec / 1e9).toFixed(1)} GB/s`;
+    if (bytesPerSec >= 1e6) return `${(bytesPerSec / 1e6).toFixed(1)} MB/s`;
+    if (bytesPerSec >= 1e3) return `${(bytesPerSec / 1e3).toFixed(1)} KB/s`;
+    return `${Math.round(bytesPerSec)} B/s`;
 }
 
 // CPU, RAM, GPU, network and disk readings from /proc, /sys and statvfs.
@@ -28,9 +29,11 @@ export class HardwareWatcher {
         this.ramUsed = 0;
         this.ramTotal = 0;
         this.disk = 0;
+        this.diskUsed = 0;    // bytes on /
+        this.diskTotal = 0;   // bytes on /
         this.gpu = null;      // 0..100 or null when no sensor is available
         this.gpuApprox = false;
-        this.up = 0;          // bits per second
+        this.up = 0;          // bytes per second
         this.down = 0;
         this._cpuPrev = null;
         this._netPrev = null;
@@ -89,8 +92,8 @@ export class HardwareWatcher {
         if (this._netPrev) {
             const dt = now - this._netPrev.t;
             if (dt > 0) {
-                this.down = Math.max(0, ((rx - this._netPrev.rx) * 8) / dt);
-                this.up = Math.max(0, ((tx - this._netPrev.tx) * 8) / dt);
+                this.down = Math.max(0, (rx - this._netPrev.rx) / dt);
+                this.up = Math.max(0, (tx - this._netPrev.tx) / dt);
             }
         }
         this._netPrev = {t: now, rx, tx};
@@ -101,7 +104,11 @@ export class HardwareWatcher {
             const info = Gio.File.new_for_path('/').query_filesystem_info('filesystem::size,filesystem::free', null);
             const size = info.get_attribute_uint64('filesystem::size');
             const free = info.get_attribute_uint64('filesystem::free');
-            if (size > 0) this.disk = Math.round(100 * (size - free) / size);
+            if (size > 0) {
+                this.disk = Math.round(100 * (size - free) / size);
+                this.diskTotal = size;
+                this.diskUsed = size - free;
+            }
         } catch (_e) { /* keep the last value */ }
     }
 

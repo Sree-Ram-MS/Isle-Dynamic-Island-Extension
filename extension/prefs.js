@@ -38,6 +38,18 @@ export default class NusaNotchPrefs extends ExtensionPreferences {
         spin(look, 'notch-scale', 'Notch size', '0.85 is the default size', 0.6, 1.6, 0.05, 2);
         sw(look, 'status-peeks', 'Status peeks', 'Battery, Wi-Fi, headphones and Caps Lock events');
 
+        const pages = group('Pages', 'Choose which pages appear in the notch (page dots and icon bar). Lyrics stays reachable from the Music page either way.');
+        sw(pages, 'show-page-music', 'Music');
+        sw(pages, 'show-page-lyrics', 'Lyrics', 'Show in the page dots and icon bar');
+        sw(pages, 'show-page-focus', 'Focus timer', 'Focus and break (Pomodoro) timer');
+        sw(pages, 'show-page-water', 'Water reminder');
+        sw(pages, 'show-page-shelf', 'Shelf');
+        sw(pages, 'show-page-todo', 'To-do');
+        sw(pages, 'show-page-calendar', 'Calendar');
+        sw(pages, 'show-page-wallpaper', 'Wallpapers');
+        sw(pages, 'show-page-power', 'Power', 'Battery and headphones');
+        sw(pages, 'show-page-hardware', 'Hardware monitor', 'System monitor: CPU, RAM, GPU, network and disk');
+
         const music = group('Music', 'Playback comes from any MPRIS player (Spotify, browsers, VLC, Rhythmbox, …).');
         sw(music, 'lyrics-enabled', 'Synced lyrics', 'Sends song title, artist, album and length to lrclib.net');
 

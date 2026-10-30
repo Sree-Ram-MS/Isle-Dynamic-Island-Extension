@@ -11,7 +11,8 @@ function eta(seconds) {
     return h ? `${h} h ${m} min` : `${m} min`;
 }
 
-// Battery / charging and connected Bluetooth headphones, side by side on one page.
+// Battery / charging and connected Bluetooth headphones: one single box,
+// split down the middle by a lightning bolt instead of two separate cards.
 export class PowerPage {
     constructor(ctx) {
         this.id = 'power';
@@ -21,11 +22,22 @@ export class PowerPage {
         this._ctx = ctx;
         this._visible = false;
         this.actor = new St.Bin({x_expand: true, y_expand: true});
-        this._root = hbox(ctx.px(8), {x_expand: true, y_expand: true});
+        this._root = hbox(ctx.px(6), {style_class: 'nusa-pcard', x_expand: true, y_expand: true});
         this.actor.set_child(this._root);
-        this._batt = vbox(ctx.px(4), {style_class: 'nusa-pcard', x_expand: true, y_expand: true, y_align: Clutter.ActorAlign.FILL});
-        this._phones = vbox(ctx.px(4), {style_class: 'nusa-pcard', x_expand: true, y_expand: true, y_align: Clutter.ActorAlign.FILL});
+        this._batt = vbox(ctx.px(4), {x_expand: true, y_expand: true, y_align: Clutter.ActorAlign.FILL});
+        this._phones = vbox(ctx.px(4), {x_expand: true, y_expand: true, y_align: Clutter.ActorAlign.FILL});
+        // the "cut": a hairline with a ⚡ badge sitting on it
+        const divider = new St.Widget({y_expand: true, layout_manager: new Clutter.BinLayout()});
+        divider.set_width(ctx.px(30));
+        const line = new St.Widget({style_class: 'nusa-splitline', x_align: Clutter.ActorAlign.CENTER, y_expand: true});
+        line.set_width(ctx.px(2));
+        const bolt = makeLabel('⚡', 'nusa-bolt', {ellipsize: false});
+        bolt.x_align = Clutter.ActorAlign.CENTER;
+        bolt.y_align = Clutter.ActorAlign.CENTER;
+        divider.add_child(line);
+        divider.add_child(bolt);
         this._root.add_child(this._batt);
+        this._root.add_child(divider);
         this._root.add_child(this._phones);
         this._unsub = ctx.sys.changed.connect(() => {
             this._drawBattery();

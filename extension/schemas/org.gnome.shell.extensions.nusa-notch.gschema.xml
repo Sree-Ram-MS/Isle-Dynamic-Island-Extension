@@ -15,5 +15,15 @@
     <key name="water-end-min" type="i"><range min="30" max="1440"/><default>1260</default><summary>Reminders end (minutes after midnight)</summary></key>
     <key name="water-interval-min" type="i"><range min="5" max="240"/><default>15</default><summary>Minutes between reminders</summary></key>
     <key name="status-peeks" type="b"><default>true</default><summary>Peek for battery, Wi-Fi, headphones and Caps Lock</summary></key>
+    <key name="show-page-music" type="b"><default>true</default><summary>Show the Music page in the notch</summary></key>
+    <key name="show-page-lyrics" type="b"><default>false</default><summary>Show Lyrics in the page dots / icon bar (always reachable from the Music page)</summary></key>
+    <key name="show-page-focus" type="b"><default>true</default><summary>Show the Focus timer page in the notch</summary></key>
+    <key name="show-page-water" type="b"><default>true</default><summary>Show the Water page in the notch</summary></key>
+    <key name="show-page-shelf" type="b"><default>true</default><summary>Show the Shelf page in the notch</summary></key>
+    <key name="show-page-todo" type="b"><default>true</default><summary>Show the To-do page in the notch</summary></key>
+    <key name="show-page-calendar" type="b"><default>true</default><summary>Show the Calendar page in the notch</summary></key>
+    <key name="show-page-wallpaper" type="b"><default>true</default><summary>Show the Wallpapers page in the notch</summary></key>
+    <key name="show-page-power" type="b"><default>true</default><summary>Show the Power page in the notch</summary></key>
+    <key name="show-page-hardware" type="b"><default>true</default><summary>Show the Hardware monitor page in the notch</summary></key>
   </schema>
 </schemalist>
