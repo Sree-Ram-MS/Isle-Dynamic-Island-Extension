@@ -16,7 +16,7 @@ function getSeat() {
 
 export function playChime() {
     try {
-        global.display.get_sound_player().play_from_theme('complete', 'Nusa Notch', null);
+        global.display.get_sound_player().play_from_theme('complete', 'Isle', null);
     } catch (_e) { /* no sound theme */ }
 }
 

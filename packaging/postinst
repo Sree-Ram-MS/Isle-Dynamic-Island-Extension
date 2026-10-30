@@ -1,6 +1,6 @@
 #!/bin/sh
 set -e
 if [ "$1" = "configure" ]; then
-    echo "Nusa Notch installed. Log out and back in, then run: nusa-notch-enable"
+    echo "Isle installed. Log out and back in, then run: nusa-notch-enable"
 fi
 exit 0

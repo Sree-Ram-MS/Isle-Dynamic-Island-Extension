@@ -1,6 +1,6 @@
-# Nusa Notch for Linux
+# Isle
 
-Unofficial Ubuntu/GNOME clone of the Nusa notch app: a notch at the top of the screen with
+Isle is an unofficial Ubuntu/GNOME clone of the Nusa notch app: a notch at the top of the screen with
 music, synced lyrics, focus timer, water reminders, file/text shelf, to-do, calendar reminders,
 wallpaper switching, battery/headphones, a hardware monitor and status peeks.
 Built as a GNOME Shell extension (GNOME 45–50, tested target: Ubuntu 26.04 / GNOME 50).

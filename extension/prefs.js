@@ -4,11 +4,11 @@ import Gtk from 'gi://Gtk';
 
 import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
-export default class NusaNotchPrefs extends ExtensionPreferences {
+export default class IslePrefs extends ExtensionPreferences {
     fillPreferencesWindow(window) {
         const s = this.getSettings();
         window.set_default_size(560, 720);
-        const page = new Adw.PreferencesPage({title: 'Nusa Notch', icon_name: 'preferences-system-symbolic'});
+        const page = new Adw.PreferencesPage({title: 'Isle', icon_name: 'preferences-system-symbolic'});
         window.add(page);
 
         const group = (title, description = '') => {
