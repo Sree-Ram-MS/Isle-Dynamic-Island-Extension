@@ -92,69 +92,131 @@ section{padding:72px 0 8px}
 .desk-win .wb span{font-size:26px;display:block}
 @media(max-width:640px){.desk-win{display:none}.desktop{height:480px}}
 
-/* ===== The notch (demo) ===== */
-.notch{position:absolute;top:34px;left:50%;transform:translateX(-50%);z-index:5;width:196px;background:#000;color:#fff;border-radius:0 0 20px 20px;font-family:var(--ui);box-shadow:0 18px 44px -14px rgba(0,0,0,.95);transition:width .55s var(--spring);cursor:pointer}
+/* ===== The notch (demo) — mirrors the real Isle extension UI ===== */
+.notch{position:absolute;top:34px;left:50%;transform:translateX(-50%);z-index:5;width:212px;background:#000;color:#fff;border-radius:0 0 26px 26px;font-family:var(--ui);box-shadow:0 18px 44px -14px rgba(0,0,0,.95);transition:width .55s var(--spring);cursor:pointer}
 .notch::before,.notch::after{content:"";position:absolute;top:0;width:14px;height:14px}
 .notch::before{right:100%;background:radial-gradient(circle at 0 100%,transparent 13.5px,#000 14px)}
 .notch::after{left:100%;background:radial-gradient(circle at 100% 100%,transparent 13.5px,#000 14px)}
-.notch.open{width:min(460px,92%)}
-.n-collapsed{display:flex;align-items:center;justify-content:center;gap:10px;height:34px;padding:0 14px;font-size:13.5px;white-space:nowrap;overflow:hidden}
-.eyes{display:inline-flex;gap:7px;align-items:center}
-.eyes i{width:6px;height:9px;border-radius:50%;background:#fff;animation:blink 4.2s infinite}
-@keyframes blink{0%,92%,100%{transform:scaleY(1)}95%{transform:scaleY(.12)}}
-.n-clock{font-weight:700}
-.n-mini{color:#a1a1a6;font-size:12.5px;display:none;align-items:center;gap:6px}
-.n-mini .eq{display:inline-flex;gap:2px;align-items:flex-end;height:10px}
-.n-mini .eq i{width:3px;background:var(--accent);border-radius:1px;animation:eq 0.9s ease-in-out infinite alternate}
-.n-mini .eq i:nth-child(2){animation-delay:.25s}.n-mini .eq i:nth-child(3){animation-delay:.5s}
-@keyframes eq{from{height:3px}to{height:10px}}
-.notch.playing .n-mini{display:inline-flex}
-.n-expanded{display:none;padding:12px 16px 12px}
+.notch.open{width:min(600px,94%)}
+.n-collapsed{display:flex;align-items:center;justify-content:center;gap:9px;height:36px;padding:0 16px;font-size:14px;white-space:nowrap;overflow:hidden}
+.notch.open .n-collapsed{display:none}
+.ring{flex:none;display:inline-flex}
+.n-clock{font-weight:700;font-size:14.5px}
+.n-eq{display:none;gap:2.5px;align-items:flex-end;height:12px}
+.n-eq i{width:3.5px;background:var(--accent);border-radius:1px;animation:eq .8s ease-in-out infinite alternate}
+.n-eq i:nth-child(2){animation-delay:.2s}.n-eq i:nth-child(3){animation-delay:.45s}.n-eq i:nth-child(4){animation-delay:.1s}
+@keyframes eq{from{height:3px}to{height:12px}}
+.notch.playing .n-eq{display:inline-flex}
+.n-lyric{display:none;align-items:center;gap:7px;color:#e8e8ec;font-size:13.5px;max-width:300px;overflow:hidden;text-overflow:ellipsis}
+.n-lyric .note{color:var(--accent)}
+.notch.mini .n-lyric{display:inline-flex}
+.notch.mini .n-clock,.notch.mini .ring{display:none}
+.notch.mini{width:auto;min-width:212px}
+.n-expanded{display:none;padding:10px 14px 8px}
 .notch.open .n-expanded{display:block}
-.notch.open .n-collapsed{justify-content:space-between}
-.n-bar{display:flex;gap:2px;justify-content:space-between;padding:2px 0 8px;border-bottom:1px solid rgba(255,255,255,.08);margin-bottom:10px}
-.n-bar button{background:none;border:0;color:#8e8e93;font-size:16px;padding:5px 7px;border-radius:9px;cursor:pointer;line-height:1}
-.n-bar button:hover{background:rgba(255,255,255,.1);color:#fff}
-.n-bar button.active{color:var(--accent);background:rgba(255,180,84,.14)}
-.page{display:none;min-height:118px}
+.n-head{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;padding:2px 2px 8px}
+.n-title{font-weight:700;font-size:16px;justify-self:start;min-height:20px}
+.n-title .t-blue{color:#6ec1e4}.n-title .t-green{color:#57cc6f}
+.n-clockbox{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:#c9c9cf}
+.n-clockbox b{color:#fff;font-size:14.5px}
+.n-gear{justify-self:end;background:none;border:0;color:#8e8e93;font-size:16px;cursor:pointer;padding:4px;line-height:1}
+.n-gear:hover{color:#fff}
+.n-body{position:relative;padding:2px 40px 0;min-height:176px}
+.chev{position:absolute;top:50%;transform:translateY(-50%);width:33px;height:33px;border-radius:50%;border:0;background:#1e1e22;color:#d7d7dc;font-size:17px;cursor:pointer;line-height:1;z-index:3}
+.chev:hover{background:#2c2c31;color:#fff}
+.chev.prev{left:0}.chev.next{right:0}
+.n-dots{display:flex;gap:6px;justify-content:center;padding:10px 0 4px}
+.n-dots i{width:7px;height:7px;border-radius:99px;background:#55555f;cursor:pointer;transition:all .25s}
+.n-dots i.on{width:20px;background:#fff}
+.page{display:none;min-height:172px;animation:pgin .3s ease}
 .page.on{display:block}
-.pg-title{font-weight:700;font-size:16.5px}
+@keyframes pgin{from{opacity:0;transform:translateX(10px)}to{opacity:1;transform:none}}
 .pg-sub{color:#a1a1a6;font-size:13px}
 .pg-dim{color:#8e8e93;font-size:12px}
-.music-row{display:flex;gap:13px;align-items:center}
-.art{width:74px;height:74px;border-radius:13px;flex:none;background:linear-gradient(140deg,#ffb454,#e95420 55%,#77216f);display:flex;align-items:center;justify-content:center;font-size:30px}
-.progress{height:5px;border-radius:3px;background:rgba(255,255,255,.18);margin:11px 0 5px;overflow:hidden}
-.progress i{display:block;height:100%;width:0%;background:var(--accent);border-radius:3px}
-.progress.blue i{background:var(--blue)}
-.times{display:flex;justify-content:space-between;font-size:11.5px;color:#8e8e93;font-variant-numeric:tabular-nums}
-.controls{display:flex;gap:8px;align-items:center;justify-content:center;margin-top:7px}
-.controls button,.pillbtn{background:rgba(255,255,255,.1);border:0;color:#fff;border-radius:12px;padding:7px 13px;cursor:pointer;font-family:var(--ui);font-size:13.5px;font-weight:600}
-.controls button:hover,.pillbtn:hover{background:rgba(255,255,255,.22)}
-.controls .play{background:var(--accent);color:#000;width:44px}
-.pillbtn.accent{background:var(--accent);color:#000}
-.lyric{color:#6e6e73;font-size:14.5px;padding:2.5px 6px;border-radius:6px;cursor:pointer}
-.lyric-pill{display:inline-flex;align-items:center;gap:8px;background:linear-gradient(180deg,#57121b,#170409);color:#fff;font-weight:700;font-size:14.5px;border-radius:99px;padding:7px 16px;margin-bottom:7px}
+/* music */
+.p-music{display:flex;gap:16px}
+.art{width:104px;height:104px;border-radius:18px;flex:none;background:linear-gradient(140deg,#ffb454,#e95420 55%,#77216f);display:flex;align-items:center;justify-content:center;font-size:42px;color:rgba(255,255,255,.92)}
+.m-right{flex:1;min-width:0;padding-top:4px}
+.m-title{font-weight:700;font-size:17.5px}
+.seek{display:flex;align-items:center;gap:9px;margin-top:14px;font-size:11.5px;color:#8e8e93;font-variant-numeric:tabular-nums}
+.seek .track{flex:1;height:4.5px;border-radius:3px;background:rgba(255,255,255,.16);position:relative}
+.seek .track i{position:absolute;left:0;top:0;height:100%;background:#fff;border-radius:3px}
+.seek .knob{position:absolute;top:50%;width:13px;height:13px;border-radius:50%;background:#fff;transform:translate(-50%,-50%)}
+.m-controls{display:flex;align-items:center;margin-top:13px}
+.m-controls .grp{display:flex;gap:20px;align-items:center;margin-inline:auto}
+.m-controls button{background:none;border:0;color:#fff;font-size:17px;cursor:pointer;padding:4px;line-height:1}
+.m-controls button:hover{color:var(--accent)}
+.m-controls .play{font-size:21px}
+.m-side{width:34px;display:flex;justify-content:flex-start}
+.m-side button{background:none;border:0;color:#d7d7dc;font-size:16px;cursor:pointer}
+.vol{display:none;width:56px;height:4.5px;border-radius:3px;background:rgba(255,255,255,.16);margin-right:2px}
+.vol i{display:block;height:100%;width:65%;background:#fff;border-radius:3px}
+.vol.show{display:block}
+/* lyrics */
+.lyric-pill{display:inline-flex;align-items:center;gap:8px;background:linear-gradient(180deg,#57121b,#170409);color:#fff;font-weight:700;font-size:15px;border-radius:99px;padding:8px 17px;margin:2px 0 9px}
 .lyric-pill .note{color:var(--accent)}
-.wp-row{display:flex;gap:9px;margin-top:9px}
-.wp-thumb{flex:1;height:52px;border-radius:10px;cursor:pointer;border:2px solid transparent}
-.wp-thumb.sel{border-color:var(--accent)}
+.lyric{color:#6e6e73;font-size:14.5px;padding:3px 6px;border-radius:6px;cursor:pointer}
 .lyric.near{color:#a1a1a6}
-.lyric.cur{color:#fff;font-weight:700;font-size:16.5px}
-.bigtime{font-size:44px;font-weight:700;text-align:center;line-height:1.1;font-variant-numeric:tabular-nums}
+.lyric.cur{color:#fff;font-weight:700;font-size:16px}
+/* focus */
+.bigtime{font-size:46px;font-weight:700;text-align:center;line-height:1.15;font-variant-numeric:tabular-nums}
 .center{text-align:center}
-.shelf-row{display:flex;gap:9px;margin-top:9px}
-.shelf-card{flex:1;background:#1c1c1e;border-radius:12px;padding:9px;font-size:11.5px;color:#d1d1d6;min-height:64px}
-.shelf-card .ic{font-size:21px;display:block;margin-bottom:3px}
-.task{display:flex;gap:9px;align-items:center;padding:4px 2px;font-size:14px}
-.task input{accent-color:var(--accent);width:16px;height:16px}
-.task.done span{text-decoration:line-through;color:#8e8e93}
-.meter{display:flex;align-items:center;gap:10px;font-size:13.5px;margin:7px 0}
-.meter .lab{width:86px;color:#a1a1a6}
-.meter .track{flex:1;height:6px;border-radius:3px;background:rgba(255,255,255,.15);overflow:hidden}
-.meter .track i{display:block;height:100%;background:var(--accent)}
-.meter .val{width:52px;text-align:right;font-variant-numeric:tabular-nums}
-.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:3px;text-align:center;font-size:11.5px;color:#a1a1a6;margin:8px 0}
-.cal-grid b{color:#fff;background:rgba(255,180,84,.25);border-radius:50%;width:22px;height:22px;line-height:22px;margin-inline:auto}
+.pillbtn{background:#26262b;border:0;color:#fff;border-radius:99px;padding:8px 16px;cursor:pointer;font-family:var(--ui);font-size:13.5px;font-weight:600}
+.pillbtn:hover{background:#34343b}
+.pillbtn.accent{background:var(--accent);color:#000}
+.pillbtn.blue{background:#2f7cf6;color:#fff}
+.pillbtn.green{background:#0e2e1a;color:#4ade80}
+.controls{display:flex;gap:9px;align-items:center;justify-content:center;margin-top:9px}
+/* water */
+.p-water{display:flex;gap:18px}
+.w-left{width:216px;flex:none}
+.w-big{font-size:37px;font-weight:700;line-height:1}
+.w-big small{font-size:15px;color:#a1a1a6;font-weight:600}
+.tog{display:inline-block;width:44px;height:25px;border-radius:99px;background:#2f7cf6;position:relative;vertical-align:middle;margin-left:10px}
+.tog::after{content:"";position:absolute;right:3px;top:3px;width:19px;height:19px;border-radius:50%;background:#fff}
+.w-track{height:4.5px;border-radius:3px;background:rgba(255,255,255,.14);margin:10px 0 12px}
+.w-track i{display:block;height:100%;background:#2f7cf6;border-radius:3px}
+.w-chart{flex:1;display:flex;align-items:flex-end;gap:7px;border-left:1px solid rgba(255,255,255,.08);padding-left:16px;position:relative}
+.w-chart .bar{flex:1;border-radius:6px 6px 3px 3px;background:#26262b;position:relative;overflow:hidden}
+.w-chart .bar i{position:absolute;bottom:0;left:0;right:0;background:#2f7cf6}
+.w-labels{display:flex;flex-direction:column;justify-content:space-between;font-size:10.5px;color:#8e8e93;padding:2px 0;text-align:right}
+/* todo */
+.p-todo{display:flex;gap:18px}
+.t-left{width:196px;flex:none}
+.t-big{font-size:39px;font-weight:700;line-height:1}
+.t-list{flex:1;display:flex;flex-direction:column;gap:9px;padding-top:2px}
+.task2{display:flex;gap:10px;align-items:center;font-size:14px;cursor:pointer}
+.task2 .box{width:19px;height:19px;border-radius:6px;flex:none;border:2px solid #555;display:inline-flex;align-items:center;justify-content:center;font-size:12px;color:#000;font-weight:900}
+.task2.done span{color:#8e8e93;text-decoration:line-through}
+.task2.done .box{border-color:transparent;color:#fff}
+/* shelf */
+.shelf-item{display:flex;gap:11px;align-items:center;background:#17171a;border:1px solid rgba(255,255,255,.05);border-radius:13px;padding:9px 12px;margin-bottom:8px;font-size:13.5px}
+.shelf-item .ic{font-size:19px}
+.shelf-item small{color:#8e8e93;display:block;font-size:11.5px}
+/* calendar */
+.p-cal{display:flex;gap:18px}
+.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:3.5px;text-align:center;font-size:11.5px;color:#a1a1a6;width:238px;flex:none}
+.cal-grid .dow{color:#6e6e73;font-size:10.5px}
+.cal-grid b{color:#000;background:var(--accent);border-radius:50%;width:22px;height:22px;line-height:22px;margin-inline:auto}
+.cal-grid .out{color:#3f3f46}
+/* wallpapers */
+.wp-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}
+.wp-thumb{height:44px;border-radius:8px;cursor:pointer;border:2.5px solid transparent}
+.wp-thumb.sel{border-color:var(--accent)}
+.wp-cap{text-align:center;color:#a1a1a6;font-size:12.5px;margin-top:10px}
+/* power */
+.power-card{display:flex;background:#17171a;border:1px solid rgba(255,255,255,.05);border-radius:18px;overflow:hidden;margin-top:8px}
+.power-half{flex:1;display:flex;gap:13px;align-items:center;padding:16px}
+.power-half + .power-half{border-left:1px solid rgba(255,255,255,.07)}
+.power-half .big{font-size:19px;font-weight:700}
+.bolt-badge{align-self:center;background:var(--accent);color:#000;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-size:13px;margin-left:-12px;z-index:2;border:3px solid #000}
+/* hardware */
+.hw-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+.hw-tile{background:#17171a;border:1px solid rgba(255,255,255,.05);border-radius:14px;padding:11px 13px}
+.hw-tile .lab{font-size:11.5px;color:#8e8e93}
+.hw-tile .val{font-size:17px;font-weight:700;margin-top:1px}
+.hw-tile .track{height:5px;border-radius:3px;background:rgba(255,255,255,.12);margin-top:7px;overflow:hidden}
+.hw-tile .track i{display:block;height:100%;background:var(--accent);border-radius:3px}
 .demo-controls{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:22px}
 .demo-controls button{background:rgba(244,242,238,.06);border:1px solid var(--line);color:var(--ink);border-radius:999px;padding:8px 16px;cursor:pointer;font-family:var(--font);font-size:14.5px}
 .demo-controls button:hover{border-color:rgba(255,180,84,.6);color:var(--accent)}
@@ -276,131 +338,150 @@ footer a:hover{color:var(--accent)}
 
       <div class="notch" id="notch" role="button" aria-label="Isle demo — hover or tap to open" tabindex="0">
         <div class="n-collapsed">
-          <span class="eyes" aria-hidden="true"><i></i><i></i></span>
+          <span class="ring" aria-hidden="true"><svg width="19" height="19" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="rgba(255,255,255,.16)" stroke-width="3.4"/><circle cx="12" cy="12" r="9" fill="none" stroke="#57cc6f" stroke-width="3.4" stroke-linecap="round" stroke-dasharray="46 56.5" transform="rotate(-90 12 12)"/></svg></span>
           <span class="n-clock" id="nClock">--:--</span>
-          <span class="n-mini"><span class="eq" aria-hidden="true"><i></i><i></i><i></i></span> Paper Sky</span>
+          <span class="n-lyric"><span class="note">♪</span><span id="nMiniText">and send them through the sky</span></span>
+          <span class="n-eq" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
         </div>
         <div class="n-expanded">
-          <div class="n-bar" role="tablist" aria-label="Notch pages">
-            <button data-page="music" class="active" title="Music" aria-label="Music">🎵</button>
-            <button data-page="lyrics" title="Lyrics" aria-label="Lyrics">🎤</button>
-            <button data-page="focus" title="Focus timer" aria-label="Focus timer">🍅</button>
-            <button data-page="water" title="Water" aria-label="Water">💧</button>
-            <button data-page="shelf" title="Shelf" aria-label="Shelf">🗄</button>
-            <button data-page="todo" title="To-do" aria-label="To-do">✓</button>
-            <button data-page="calendar" title="Calendar" aria-label="Calendar">📅</button>
-            <button data-page="wallpaper" title="Wallpapers" aria-label="Wallpapers">🖼</button>
-            <button data-page="power" title="Power" aria-label="Power">🔋</button>
-            <button data-page="hardware" title="Hardware" aria-label="Hardware">📊</button>
+          <div class="n-head">
+            <span class="n-title" id="nTitle"></span>
+            <span class="n-clockbox"><span class="ring" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="rgba(255,255,255,.16)" stroke-width="3.4"/><circle cx="12" cy="12" r="9" fill="none" stroke="#57cc6f" stroke-width="3.4" stroke-linecap="round" stroke-dasharray="46 56.5" transform="rotate(-90 12 12)"/></svg></span><span id="nDate">Fri 30 Oct 2026</span><b id="nClock2">--:--</b></span>
+            <button class="n-gear" id="nGear" aria-label="Settings">⚙</button>
           </div>
+          <div class="n-body">
+            <button class="chev prev" id="pgPrev" aria-label="Previous page">‹</button>
+            <button class="chev next" id="pgNext" aria-label="Next page">›</button>
 
-          <div class="page on" data-page="music">
-            <div class="music-row">
-              <div class="art">🎵</div>
-              <div>
-                <div class="pg-title">Paper Sky</div>
-                <div class="pg-sub">Lumen Coast — Summer Flows</div>
-                <div class="pg-dim">Spotify · any MPRIS player works</div>
+            <div class="page on" data-page="music">
+              <div class="p-music">
+                <div class="art">♪</div>
+                <div class="m-right">
+                  <div class="m-title">Paper Sky</div>
+                  <div class="pg-sub">Lumen Coast — Summer Flows</div>
+                  <div class="seek"><span id="mCur">0:42</span><span class="track"><i id="mProg" style="width:16%"></i><span class="knob" id="mKnob" style="left:16%"></span></span><span>−<span id="mLeft">3:34</span></span></div>
+                  <div class="m-controls">
+                    <span class="m-side"><button id="mLyrics" aria-label="Show lyrics">≋</button></span>
+                    <span class="grp">
+                      <button id="mPrev" aria-label="Previous track">⏮</button>
+                      <button id="mPlay" class="play" aria-label="Play or pause">▶</button>
+                      <button id="mNext" aria-label="Next track">⏭</button>
+                    </span>
+                    <span class="m-side" style="justify-content:flex-end;align-items:center;display:inline-flex">
+                      <span class="vol" id="mVol"><i></i></span>
+                      <button id="mSpeaker" aria-label="Volume">🔊</button>
+                    </span>
+                  </div>
+                </div>
+              </div>
+              <div class="pg-dim" style="margin-top:10px">Any MPRIS player — Spotify, Firefox, VLC. The speaker opens a small volume slider, right where you expect it.</div>
+            </div>
+
+            <div class="page" data-page="lyrics">
+              <div><span class="lyric-pill"><span class="note">♪</span><span id="pillLine">and send them through the sky</span></span></div>
+              <div id="lyricsBox">
+                <div class="lyric">we fold the summer light</div>
+                <div class="lyric">into paper birds tonight</div>
+                <div class="lyric">and send them through the sky</div>
+                <div class="lyric">to find you by the sea</div>
+                <div class="lyric">every wing a little song</div>
+              </div>
+              <div class="pg-dim" style="margin-top:7px">Synced by LRCLIB. Close the notch from this page and the line stays in the minimized notch — try it: move your mouse away.</div>
+            </div>
+
+            <div class="page" data-page="focus">
+              <div class="center">
+                <div class="pg-sub" id="fMode">Focus time</div>
+                <div class="bigtime" id="fTime">25:00</div>
+                <div class="controls">
+                  <button class="pillbtn accent" id="fStart">▶ Start</button>
+                  <button class="pillbtn" id="fReset">Reset</button>
+                </div>
+                <div class="pg-dim" style="margin-top:8px">Pomodoro sessions with a soft chime when it’s time to rest. Lengths are yours to set in Settings.</div>
               </div>
             </div>
-            <div class="progress"><i id="mProg"></i></div>
-            <div class="times"><span id="mCur">0:00</span><span>−<span id="mLeft">4:16</span></span></div>
-            <div class="controls">
-              <button id="mPrev" aria-label="Previous track">⏮</button>
-              <button id="mPlay" class="play" aria-label="Play or pause">▶</button>
-              <button id="mNext" aria-label="Next track">⏭</button>
-              <button id="mLyrics" aria-label="Show lyrics">🎤 Lyrics</button>
-            </div>
-          </div>
 
-          <div class="page" data-page="lyrics">
-            <div class="pg-title" style="margin-bottom:6px">Paper Sky <span class="pg-sub">· synced by LRCLIB</span></div>
-            <div><span class="lyric-pill"><span class="note">♪</span> and send them through the sky</span></div>
-            <div id="lyricsBox">
-              <div class="lyric">we fold the summer light</div>
-              <div class="lyric">into paper birds tonight</div>
-              <div class="lyric">to find you by the sea</div>
-              <div class="lyric">every wing a little song</div>
-            </div>
-            <div class="pg-dim" style="margin-top:6px">The current line sits in the pill. Close the notch from here and the line stays in the minimized notch.</div>
-          </div>
-
-          <div class="page" data-page="focus">
-            <div class="center">
-              <div class="pg-sub">🍅 Focus timer</div>
-              <div class="bigtime" id="fTime">25:00</div>
-              <div class="controls">
-                <button class="pillbtn" id="fMode">Focus time</button>
-                <button class="pillbtn accent" id="fStart">▶ Start</button>
-                <button class="pillbtn" id="fReset">Reset</button>
+            <div class="page" data-page="water">
+              <div class="p-water">
+                <div class="w-left">
+                  <span class="w-big"><span id="wNow">1.0</span> <small>/ 1.5 L</small></span><span class="tog" aria-hidden="true"></span>
+                  <div class="pg-sub" style="margin-top:7px">Today · <span id="wPct">67%</span> · Reminders on</div>
+                  <div class="w-track"><i id="wProg" style="width:67%"></i></div>
+                  <div style="display:flex;gap:8px">
+                    <button class="pillbtn blue" id="wDrink">💧 Drink</button>
+                    <button class="pillbtn" id="wReset">Reset</button>
+                  </div>
+                </div>
+                <div class="w-chart" id="wBars"></div>
+                <div class="w-labels"><span>400</span><span>200</span><span>0 ml</span></div>
               </div>
-              <div class="pg-dim" style="margin-top:7px">A soft chime tells you when to take a break.</div>
+            </div>
+
+            <div class="page" data-page="shelf">
+              <div class="shelf-item"><span class="ic">🖼</span><div>beach.jpg<small>Image · 2.4 MB — tap to open</small></div></div>
+              <div class="shelf-item"><span class="ic">📁</span><div>Project files<small>Folder — kept where it lives, never copied</small></div></div>
+              <div class="shelf-item"><span class="ic">📝</span><div>“Call the studio at 5…”<small>Text card</small></div></div>
+              <div class="pg-dim">Files and text you keep close. On GNOME the Shelf uses Add files / Paste / Copy — shell extensions can’t receive drags from other apps.</div>
+            </div>
+
+            <div class="page" data-page="todo">
+              <div class="p-todo">
+                <div class="t-left">
+                  <div class="t-big" id="tBig">5/6</div>
+                  <div class="pg-sub" style="margin:3px 0 11px">Task Done Today</div>
+                  <div style="display:flex;gap:8px;flex-wrap:wrap">
+                    <button class="pillbtn green">+ Add Task</button>
+                    <button class="pillbtn">✎ Edit Task</button>
+                  </div>
+                </div>
+                <div class="t-list" id="tList"></div>
+              </div>
+            </div>
+
+            <div class="page" data-page="calendar">
+              <div class="p-cal">
+                <div>
+                  <div style="font-weight:700;margin-bottom:6px" id="calTitle">October 2026</div>
+                  <div class="cal-grid" id="calGrid"></div>
+                </div>
+                <div style="flex:1">
+                  <div class="shelf-item"><span class="ic">📌</span><div>Design review<small>Today · 15:00 · reminder set</small></div></div>
+                  <div class="shelf-item"><span class="ic">🎂</span><div>Amma’s birthday<small>Tomorrow · all day</small></div></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="page" data-page="wallpaper">
+              <div class="wp-grid" id="wpGrid"></div>
+              <div class="wp-cap">Applied · <span id="wpName">ezspain-Ubuntu_Coffee_Mug_Dark.png</span></div>
+            </div>
+
+            <div class="page" data-page="power">
+              <div class="power-card">
+                <div class="power-half">
+                  <span class="ring" aria-hidden="true"><svg width="52" height="52" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="rgba(255,255,255,.13)" stroke-width="2.6"/><circle cx="12" cy="12" r="9" fill="none" stroke="#57cc6f" stroke-width="2.6" stroke-linecap="round" stroke-dasharray="56 56.5" transform="rotate(-90 12 12)"/><path d="M12.7 7.5 10 12.4h2l-1 4.1 3.9-5.4h-2.2l1-3.6z" fill="#57cc6f"/></svg></span>
+                  <div><div class="big">99%</div><div class="pg-sub">Battery · Charging</div></div>
+                </div>
+                <div class="bolt-badge">⚡</div>
+                <div class="power-half">
+                  <span style="font-size:30px">🎧</span>
+                  <div><div class="big">70%</div><div class="pg-sub">Headphones · Connected</div></div>
+                </div>
+              </div>
+              <div class="pg-dim" style="margin-top:9px">One card for battery and headphones. The ring turns blue at 100%, red when low — and the bolt sits dead centre while charging.</div>
+            </div>
+
+            <div class="page" data-page="hardware">
+              <div class="hw-grid">
+                <div class="hw-tile"><div class="lab">CPU</div><div class="val">12%</div><div class="track"><i style="width:12%"></i></div></div>
+                <div class="hw-tile"><div class="lab">Memory</div><div class="val">6.7 / 16 GB</div><div class="track"><i style="width:42%"></i></div></div>
+                <div class="hw-tile"><div class="lab">Disk · /</div><div class="val">61% · 142 / 232 GB</div><div class="track"><i style="width:61%"></i></div></div>
+                <div class="hw-tile"><div class="lab">Network</div><div class="val">↓ 855 B/s · ↑ 12 KB/s</div><div class="track"><i style="width:24%"></i></div></div>
+              </div>
+              <div class="pg-dim" style="margin-top:9px">Real numbers from your machine, in bytes — no separate system-monitor window needed.</div>
             </div>
           </div>
-
-          <div class="page" data-page="water">
-            <div class="pg-title">Water <span style="color:var(--blue)">Reminder</span></div>
-            <div style="font-size:26px;font-weight:700;margin-top:2px"><span id="wNow">750</span> <span class="pg-sub">/ 1,500 ml</span></div>
-            <div class="progress blue"><i id="wProg" style="width:50%"></i></div>
-            <div class="pg-sub">Today · <b id="wPct" style="color:var(--blue)">50%</b> · Reminders during your hours</div>
-            <div class="controls" style="justify-content:flex-start">
-              <button class="pillbtn accent" id="wDrink">💧 Drink 250 ml</button>
-              <button class="pillbtn" id="wReset">Reset</button>
-            </div>
-          </div>
-
-          <div class="page" data-page="shelf">
-            <div class="pg-title">Shelf <span class="pg-sub">· files &amp; text, kept close</span></div>
-            <div class="shelf-row">
-              <div class="shelf-card"><span class="ic">🖼</span>beach.jpg<br>2.4 MB</div>
-              <div class="shelf-card"><span class="ic">📁</span>Project files<br>Folder</div>
-              <div class="shelf-card"><span class="ic">📝</span>“Call the studio at 5…”<br>Text card</div>
-            </div>
-            <div class="pg-dim" style="margin-top:8px">On GNOME the Shelf uses Add files / Paste / Copy — shell extensions can’t receive drags from other apps.</div>
-          </div>
-
-          <div class="page" data-page="todo">
-            <div class="pg-title">To-do <span class="pg-sub">· <span id="tCount">3/5</span> done today</span></div>
-            <label class="task done"><input type="checkbox" checked class="tChk"><span>Revise the report</span></label>
-            <label class="task done"><input type="checkbox" checked class="tChk"><span>Reply to Dina</span></label>
-            <label class="task done"><input type="checkbox" checked class="tChk"><span>Post weekly update</span></label>
-            <label class="task"><input type="checkbox" class="tChk"><span>Book the studio — ⏰ 17:00 reminder</span></label>
-            <label class="task"><input type="checkbox" class="tChk"><span>Water the plants</span></label>
-          </div>
-
-          <div class="page" data-page="calendar">
-            <div class="pg-title">Calendar <span class="pg-sub">· October 2026</span></div>
-            <div class="cal-grid"><span>Mo</span><span>Tu</span><span>We</span><span>Th</span><span>Fr</span><span>Sa</span><span>Su</span><span>26</span><span>27</span><span>28</span><b>29</b><span>30</span><span>31</span><span>1</span></div>
-            <div class="task">📌 <span>Design review — today, 15:00 · reminder set</span></div>
-            <div class="task">🎂 <span>Amma’s birthday — tomorrow</span></div>
-          </div>
-
-          <div class="page" data-page="wallpaper">
-            <div class="pg-title">Wallpapers <span class="pg-sub">· tap one to apply it</span></div>
-            <div class="wp-row">
-              <div class="wp-thumb sel" style="background:linear-gradient(135deg,#f6a34c,#c94f30)" title="Sunset"></div>
-              <div class="wp-thumb" style="background:linear-gradient(135deg,#2b5876,#4e4376)" title="Dusk"></div>
-              <div class="wp-thumb" style="background:linear-gradient(135deg,#134e5e,#71b280)" title="Forest"></div>
-              <div class="wp-thumb" style="background:linear-gradient(135deg,#232526,#414345)" title="Slate"></div>
-            </div>
-            <div class="pg-dim" style="margin-top:8px">From ~/Pictures and /usr/share/backgrounds. Thumbnails load at thumbnail size — the page stays light.</div>
-          </div>
-
-          <div class="page" data-page="power">
-            <div class="pg-title">Power</div>
-            <div class="meter"><span class="lab">🔋 Battery</span><span class="track"><i style="width:70%;background:var(--green)"></i></span><span class="val">70%</span></div>
-            <div class="pg-sub">⚡ Charging · charger connected</div>
-            <div class="meter" style="margin-top:12px"><span class="lab">🎧 Earbuds</span><span class="track"><i style="width:70%"></i></span><span class="val">70%</span></div>
-            <div class="pg-sub">AirBuds Pro · connected over Bluetooth</div>
-          </div>
-
-          <div class="page" data-page="hardware">
-            <div class="pg-title">Hardware <span class="pg-sub">· at a glance</span></div>
-            <div class="meter"><span class="lab">CPU</span><span class="track"><i style="width:18%"></i></span><span class="val">18%</span></div>
-            <div class="meter"><span class="lab">Memory</span><span class="track"><i style="width:42%"></i></span><span class="val">42%</span></div>
-            <div class="meter"><span class="lab">Temperature</span><span class="track"><i style="width:54%;background:var(--red)"></i></span><span class="val">54 °C</span></div>
-            <div class="pg-dim">CPU, RAM, GPU, network and disk — no separate system-monitor window needed.</div>
-          </div>
+          <div class="n-dots" id="nDots" aria-label="Pages"></div>
         </div>
       </div>
     </div>
@@ -462,7 +543,7 @@ footer a:hover{color:var(--accent)}
 <!-- ===== Settings ===== -->
 <section id="settings" class="wrap">
   <h2 class="sec-title">Make it yours.</h2>
-  <p class="sec-lede">Open the separate Settings window from the gear in the notch, from Extension Manager, or with <span style="font-family:var(--mono);font-size:.92em">gnome-extensions prefs nusa-notch@linux-clone</span>. Every change applies instantly — these are the real settings in 1.6.1.</p>
+  <p class="sec-lede">Open the separate Settings window from the gear in the notch, from Extension Manager, or with <span style="font-family:var(--mono);font-size:.92em">gnome-extensions prefs nusa-notch@linux-clone</span>. Every change applies instantly — these are the real settings in 1.6.2.</p>
   <div class="setlist">
     <div class="setcard">
       <div class="setrow"><div><h4>Mascot</h4><p>A pair of eyes when the computer is idle</p></div><span class="tog on"></span></div>
@@ -510,9 +591,9 @@ cd Isle-Dynamic-Island-Extension</div>
     </div></div>
     <div class="step"><span class="num">2</span><div style="flex:1;min-width:0">
       <h3>Build &amp; install the .deb</h3>
-      <p>This builds <span style="font-family:var(--mono);font-size:.92em">nusa-notch_1.6.1_all.deb</span> and installs it with apt (if you downloaded the release .deb instead, install that file the same way):</p>
+      <p>This builds <span style="font-family:var(--mono);font-size:.92em">nusa-notch_1.6.2_all.deb</span> and installs it with apt (if you downloaded the release .deb instead, install that file the same way):</p>
       <div class="code"><button class="copy">Copy</button>./build-deb.sh
-sudo apt install ./dist/nusa-notch_1.6.1_all.deb</div>
+sudo apt install ./dist/nusa-notch_1.6.2_all.deb</div>
     </div></div>
     <div class="step"><span class="num">3</span><div style="flex:1;min-width:0">
       <h3>Log out once, then enable</h3>
@@ -591,46 +672,72 @@ gnome-extensions info nusa-notch@linux-clone</div>
 (function(){
   "use strict";
   var notch=document.getElementById('notch');
+  var ORDER=['music','lyrics','focus','water','shelf','todo','calendar','wallpaper','power','hardware'];
+  var TITLES={music:'',lyrics:'Lyrics',focus:'Focus',water:'Water <span class="t-blue">Reminder</span>',shelf:'Shelf',todo:'Todo <span class="t-green">List</span>',calendar:'Calendar',wallpaper:'Wallpapers',power:'Power',hardware:'Hardware'};
   var pages={};
   document.querySelectorAll('.page').forEach(function(p){pages[p.dataset.page]=p;});
-  var barBtns={};
-  document.querySelectorAll('.n-bar button').forEach(function(b){barBtns[b.dataset.page]=b;});
+  var titleEl=document.getElementById('nTitle');
+  var dotsEl=document.getElementById('nDots');
+  ORDER.forEach(function(k){
+    var d=document.createElement('i');
+    d.title=k; d.setAttribute('role','button'); d.setAttribute('aria-label',k);
+    d.addEventListener('click',function(e){e.stopPropagation();setPage(k);open();});
+    dotsEl.appendChild(d);
+  });
+  var dots=[].slice.call(dotsEl.children);
   var current='music', closeTimer=null;
 
   function setPage(name){
     if(!pages[name])return;
     current=name;
     Object.keys(pages).forEach(function(k){pages[k].classList.toggle('on',k===name);});
-    Object.keys(barBtns).forEach(function(k){barBtns[k].classList.toggle('active',k===name);});
+    dots.forEach(function(d,i){d.classList.toggle('on',ORDER[i]===name);});
+    titleEl.innerHTML=TITLES[name]||'';
   }
-  function open(){clearTimeout(closeTimer);notch.classList.add('open');}
-  function closeSoon(){clearTimeout(closeTimer);closeTimer=setTimeout(function(){notch.classList.remove('open');},550);}
+  function step(dir){var i=ORDER.indexOf(current);setPage(ORDER[(i+dir+ORDER.length)%ORDER.length]);}
+  function open(){clearTimeout(closeTimer);notch.classList.remove('mini');notch.classList.add('open');}
+  function closeSoon(){clearTimeout(closeTimer);closeTimer=setTimeout(function(){
+    notch.classList.remove('open');
+    if(current==='lyrics'&&playing)notch.classList.add('mini');else notch.classList.remove('mini');
+  },550);}
   notch.addEventListener('mouseenter',open);
   notch.addEventListener('mouseleave',closeSoon);
-  notch.addEventListener('click',function(e){if(e.target.closest('button,input,label,a'))return;notch.classList.toggle('open');});
+  notch.addEventListener('click',function(e){if(e.target.closest('button,input,label,a,i.wp-thumb,.task2'))return;notch.classList.toggle('open');if(notch.classList.contains('open'))notch.classList.remove('mini');});
   notch.addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();notch.classList.toggle('open');}});
   notch.addEventListener('focus',open);
-  Object.keys(barBtns).forEach(function(k){barBtns[k].addEventListener('click',function(e){e.stopPropagation();setPage(k);open();});});
+  document.getElementById('pgPrev').addEventListener('click',function(e){e.stopPropagation();step(-1);open();});
+  document.getElementById('pgNext').addEventListener('click',function(e){e.stopPropagation();step(1);open();});
+  document.getElementById('nGear').addEventListener('click',function(e){e.stopPropagation();});
   document.querySelectorAll('#demoControls button').forEach(function(b){
     b.addEventListener('click',function(){setPage(b.dataset.page);open();notch.scrollIntoView({block:'nearest',behavior:'smooth'});});
   });
   var lyBtn=document.getElementById('mLyrics');
-  if(lyBtn)lyBtn.addEventListener('click',function(e){e.stopPropagation();setPage('lyrics');});
+  if(lyBtn)lyBtn.addEventListener('click',function(e){e.stopPropagation();setPage('lyrics');open();});
+  var spk=document.getElementById('mSpeaker');
+  if(spk)spk.addEventListener('click',function(e){e.stopPropagation();document.getElementById('mVol').classList.toggle('show');});
 
-  /* clock */
-  var clock=document.getElementById('nClock');
-  function tickClock(){var d=new Date();clock.textContent=String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');}
+  /* clock + date, like the real notch */
+  var clock=document.getElementById('nClock'), clock2=document.getElementById('nClock2'), dateEl=document.getElementById('nDate');
+  function tickClock(){
+    var d=new Date(), h=d.getHours(), ap=h>=12?'PM':'AM'; h=h%12||12;
+    var t=h+':'+String(d.getMinutes()).padStart(2,'0')+' '+ap;
+    clock.textContent=t; clock2.textContent=t;
+    dateEl.textContent=d.toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short',year:'numeric'}).replace(',','');
+  }
   tickClock();setInterval(tickClock,20000);
 
-  /* music demo */
+  /* music + lyrics demo */
   var DUR=256, pos=42, playing=false, mTimer=null;
-  var mProg=document.getElementById('mProg'), mCur=document.getElementById('mCur'), mLeft=document.getElementById('mLeft'), mPlay=document.getElementById('mPlay');
+  var mProg=document.getElementById('mProg'), mKnob=document.getElementById('mKnob'), mCur=document.getElementById('mCur'), mLeft=document.getElementById('mLeft'), mPlay=document.getElementById('mPlay');
   var lyrics=[].slice.call(document.querySelectorAll('#lyricsBox .lyric'));
+  var pillLine=document.getElementById('pillLine'), miniText=document.getElementById('nMiniText');
   function fmt(s){s=Math.max(0,Math.floor(s));return Math.floor(s/60)+':'+String(s%60).padStart(2,'0');}
   function drawMusic(){
-    mProg.style.width=(pos/DUR*100)+'%'; mCur.textContent=fmt(pos); mLeft.textContent=fmt(DUR-pos);
+    var pct=(pos/DUR*100);
+    mProg.style.width=pct+'%'; mKnob.style.left=pct+'%'; mCur.textContent=fmt(pos); mLeft.textContent=fmt(DUR-pos);
     var idx=Math.min(lyrics.length-1,Math.floor(pos/DUR*lyrics.length));
     lyrics.forEach(function(l,i){l.classList.toggle('cur',i===idx);l.classList.toggle('near',Math.abs(i-idx)===1);});
+    pillLine.textContent=lyrics[idx].textContent; miniText.textContent=lyrics[idx].textContent;
   }
   function setPlaying(on){
     playing=on; mPlay.textContent=on?'⏸':'▶'; notch.classList.toggle('playing',on);
@@ -658,18 +765,90 @@ gnome-extensions info nusa-notch@linux-clone</div>
   drawFocus();
 
   /* water demo */
-  var water=750, GOAL=1500;
-  var wNow=document.getElementById('wNow'), wProg=document.getElementById('wProg'), wPct=document.getElementById('wPct');
-  function drawWater(){wNow.textContent=water.toLocaleString('en-IN');var p=Math.min(100,Math.round(water/GOAL*100));wProg.style.width=p+'%';wPct.textContent=p+'%'+(p>=100?' · Goal reached 🎉':'');}
+  var water=1000, GOAL=1500;
+  var wNow=document.getElementById('wNow'), wProg=document.getElementById('wProg'), wPct=document.getElementById('wPct'), wBars=document.getElementById('wBars');
+  var barH=[38,58,44,72,52,88,48,64,34];
+  barH.forEach(function(h){var b=document.createElement('div');b.className='bar';b.style.height=h+'px';b.appendChild(document.createElement('i'));wBars.appendChild(b);});
+  function drawWater(){
+    wNow.textContent=(water/1000).toFixed(1);
+    var p=Math.min(100,Math.round(water/GOAL*100)); wProg.style.width=p+'%'; wPct.textContent=p+'%';
+    var frac=water/GOAL;
+    [].forEach.call(wBars.children,function(b,i){
+      var f=Math.max(0,Math.min(1,frac*barH.length-i));
+      b.firstChild.style.height=(f*100)+'%';
+    });
+  }
   document.getElementById('wDrink').addEventListener('click',function(e){e.stopPropagation();water=Math.min(GOAL,water+250);drawWater();});
   document.getElementById('wReset').addEventListener('click',function(e){e.stopPropagation();water=0;drawWater();});
   drawWater();
 
-  /* todo demo */
-  var chks=[].slice.call(document.querySelectorAll('.tChk')), tCount=document.getElementById('tCount');
-  function drawTodo(){var done=chks.filter(function(c){return c.checked;}).length;tCount.textContent=done+'/'+chks.length;chks.forEach(function(c){c.closest('.task').classList.toggle('done',c.checked);});}
-  chks.forEach(function(c){c.addEventListener('change',drawTodo);c.addEventListener('click',function(e){e.stopPropagation();});});
+  /* todo demo — mirrors the real page */
+  var TASKS=[
+    ['CRM Customization',true,'#a06ee8'],
+    ['swipe not working in shelf',true,'#4da3ff'],
+    ['When music play',true,'#a06ee8'],
+    ['Speed meter in Bytes',true,'#e85454'],
+    ['Power section – Battery and Head Thunder cross',true,'#e8913a'],
+    ['Disk with free space',false,'#e8c93a']
+  ];
+  var tList=document.getElementById('tList'), tBig=document.getElementById('tBig');
+  function drawTodo(){
+    var done=TASKS.filter(function(t){return t[1];}).length;
+    tBig.textContent=done+'/'+TASKS.length;
+    tList.innerHTML='';
+    TASKS.forEach(function(t,i){
+      var row=document.createElement('div'); row.className='task2'+(t[1]?' done':'');
+      var box=document.createElement('span'); box.className='box';
+      box.style.background=t[1]?t[2]:'transparent'; box.style.borderColor=t[2]; box.textContent=t[1]?'✓':'';
+      var lab=document.createElement('span'); lab.textContent=t[0];
+      row.appendChild(box); row.appendChild(lab);
+      row.addEventListener('click',function(e){e.stopPropagation();TASKS[i][1]=!TASKS[i][1];drawTodo();});
+      tList.appendChild(row);
+    });
+  }
   drawTodo();
+
+  /* calendar demo — the real current month */
+  (function(){
+    var now=new Date(), y=now.getFullYear(), m=now.getMonth();
+    document.getElementById('calTitle').textContent=now.toLocaleDateString('en-GB',{month:'long',year:'numeric'});
+    var grid=document.getElementById('calGrid');
+    ['Mo','Tu','We','Th','Fr','Sa','Su'].forEach(function(d){var s=document.createElement('span');s.className='dow';s.textContent=d;grid.appendChild(s);});
+    var first=(new Date(y,m,1).getDay()+6)%7, days=new Date(y,m+1,0).getDate(), prevDays=new Date(y,m,0).getDate();
+    for(var i=0;i<first;i++){var s1=document.createElement('span');s1.className='out';s1.textContent=prevDays-first+1+i;grid.appendChild(s1);}
+    for(var dnum=1;dnum<=days;dnum++){
+      if(dnum===now.getDate()){var b=document.createElement('b');b.textContent=dnum;grid.appendChild(b);}
+      else{var s2=document.createElement('span');s2.textContent=dnum;grid.appendChild(s2);}
+    }
+  })();
+
+  /* wallpaper demo — tap to apply, like the real page */
+  var WALLS=[
+    ['linear-gradient(135deg,#3a3a40,#17171a)','Abstract_Grey.png'],
+    ['linear-gradient(135deg,#e8e8ec,#9a9aa2)','Abstract_Light.png'],
+    ['linear-gradient(135deg,#5b2333,#2a0f18)','Berries_Dark.png'],
+    ['linear-gradient(135deg,#0e7c86,#083f4a)','Blue_Cube.png'],
+    ['linear-gradient(135deg,#232526,#414345)','Slate.png'],
+    ['linear-gradient(135deg,#8e2a4e,#3d1030)','Magenta_Wave.png'],
+    ['linear-gradient(160deg,#1c1c22,#3d2b45 55%,#c2510f)','ezspain-Ubuntu_Coffee_Mug_Dark.png'],
+    ['linear-gradient(135deg,#4a1042,#e95420)','Coffee_Mug.png'],
+    ['linear-gradient(135deg,#f6a34c,#c94f30)','Sunset.png'],
+    ['linear-gradient(135deg,#2b5876,#4e4376)','Dusk.png'],
+    ['linear-gradient(135deg,#581845,#900c3f)','Purple_Fold.png'],
+    ['linear-gradient(135deg,#0f2027,#2c5364)','Deep_Sea.png']
+  ];
+  var wpGrid=document.getElementById('wpGrid'), wpName=document.getElementById('wpName');
+  var desk=document.querySelector('.desktop');
+  WALLS.forEach(function(w,i){
+    var t=document.createElement('div'); t.className='wp-thumb'+(i===6?' sel':''); t.style.background=w[0]; t.title=w[1];
+    t.addEventListener('click',function(e){
+      e.stopPropagation();
+      [].forEach.call(wpGrid.children,function(c){c.classList.remove('sel');});
+      t.classList.add('sel'); wpName.textContent=w[1];
+      if(desk)desk.style.background=w[0];
+    });
+    wpGrid.appendChild(t);
+  });
 
   /* copy buttons */
   document.querySelectorAll('.copy').forEach(function(btn){
@@ -679,6 +858,8 @@ gnome-extensions info nusa-notch@linux-clone</div>
       if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(done,done);}else{done();}
     });
   });
+
+  setPage('music');
 
   /* open the demo once it scrolls into view */
   if('IntersectionObserver' in window){
