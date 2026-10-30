@@ -5,6 +5,9 @@ music, synced lyrics, focus timer, water reminders, file/text shelf, to-do, cale
 wallpaper switching, battery/headphones, a hardware monitor and status peeks.
 Built as a GNOME Shell extension (GNOME 45–50, tested target: Ubuntu 26.04 / GNOME 50).
 
+**Inspired by [Nusa for Windows](https://rama2555.github.io/nusa/)** — Isle is an independent
+re-creation of its notch idea for Ubuntu/GNOME. No code or assets from the original are included.
+
 ## Highlights (v1.6.1)
 - Hover the page dots for a **page icon bar**; page changes **slide** smoothly.
 - **Lyrics pill** on the Lyrics page, and closing the notch from Lyrics puts the

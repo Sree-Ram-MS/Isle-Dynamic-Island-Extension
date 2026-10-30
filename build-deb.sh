@@ -29,7 +29,7 @@ Depends: gnome-shell (>= 45)
 Recommends: gnome-shell-extension-manager, upower, bluez, network-manager
 Installed-Size: $SIZE
 Maintainer: Sreeram <sreeram@tecfuge.com>
-Homepage: https://github.com/Sree-Ram-MS/Nusa-Dynamic-Island-Extension
+Homepage: https://github.com/Sree-Ram-MS/Isle-Dynamic-Island-Extension
 Description: Notch at the top of the screen for music, lyrics, timers and more
  Isle is an unofficial Linux clone of the Nusa notch app, a GNOME Shell
  extension. Shows what is playing (any MPRIS player) with synced lyrics from
