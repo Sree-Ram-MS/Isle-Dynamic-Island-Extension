@@ -41,6 +41,7 @@ const DEFAULT_SETTINGS = {
     hideFullscreen: true,
     sounds: true,
     lyricsPill: true,
+    todoRemind: true,
     pages: {music: true, pomodoro: true, water: true, shelf: true, todo: true, calendar: true},
     pomo: {focus: 25, short: 5, long: 15},
     water: {goal: 1500, bottle: 250, remind: true},
@@ -56,34 +57,29 @@ function scaleFactor() {
 }
 
 // ---------- notch window ----------
-const BASE = {
-    line: {width: 360, height: 14},
-    pill: {width: 380, height: 56},
-    pillLyrics: {width: 380, height: 148},
-    card: {width: 700, height: 500},
-    cardLyrics: {width: 700, height: 596},
-};
+// The renderer decides the exact size for every state (the original
+// notch hugs its content: a ~216px clock pill, a 544px card whose
+// height fits the page) and the main process just scales and centres.
 let notch = null;
 let settingsWin = null;
 let tray = null;
-let currentMode = 'pill';
+let lastSize = {width: 216, height: 42};
 let hiddenByFullscreen = false;
 
-function boundsFor(mode) {
+function boundsFor(size) {
     const s = scaleFactor();
-    const base = BASE[mode] || BASE.pill;
-    const width = Math.round(base.width * s);
-    const height = Math.round(base.height * s);
+    const width = Math.round(size.width * s);
+    const height = Math.round(size.height * s);
     const b = screen.getPrimaryDisplay().bounds;
     return {x: b.x + Math.round((b.width - width) / 2), y: b.y, width, height};
 }
-function applyMode() {
-    if (notch) notch.setBounds(boundsFor(currentMode));
+function applySize() {
+    if (notch) notch.setBounds(boundsFor(lastSize));
 }
 
 function createNotch() {
     notch = new BrowserWindow({
-        ...boundsFor(currentMode),
+        ...boundsFor(lastSize),
         transparent: true,
         frame: false,
         resizable: false,
@@ -150,7 +146,7 @@ function buildTray() {
 function applySettingsSideEffects() {
     const exe = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;
     app.setLoginItemSettings({openAtLogin: !!settings.startWithWindows, path: exe});
-    applyMode();
+    applySize();
     buildTray();
 }
 function setSettings(patch) {
@@ -256,10 +252,10 @@ ipcMain.handle('shell:open', (_e, p) => shell.openPath(p));
 ipcMain.handle('notify', (_e, title, body) => {
     if (Notification.isSupported()) new Notification({title, body}).show();
 });
-ipcMain.handle('win:mode', (_e, mode) => {
-    if (BASE[mode]) {
-        currentMode = mode;
-        applyMode();
+ipcMain.handle('win:size', (_e, size) => {
+    if (size && size.width >= 100 && size.height >= 10) {
+        lastSize = {width: Math.round(size.width), height: Math.round(size.height)};
+        applySize();
     }
 });
 ipcMain.handle('app:quit', () => app.quit());

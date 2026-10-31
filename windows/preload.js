@@ -21,7 +21,7 @@ contextBridge.exposeInMainWorld('isle', {
     pathForFile: (file) => webUtils.getPathForFile(file),
     dragStart: (files) => ipcRenderer.send('dragstart', files),
     // window + app
-    setMode: (mode) => ipcRenderer.invoke('win:mode', mode),
+    setSize: (width, height) => ipcRenderer.invoke('win:size', {width, height}),
     notify: (title, body) => ipcRenderer.invoke('notify', title, body),
     quit: () => ipcRenderer.invoke('app:quit'),
 });

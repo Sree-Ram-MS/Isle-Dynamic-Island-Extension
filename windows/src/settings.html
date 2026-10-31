@@ -5,45 +5,54 @@
 <title>Isle Settings</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: "Segoe UI", system-ui, sans-serif; background: #17171a; color: #f2f2f2;
-    display: flex; height: 100vh; overflow: hidden; }
-  #side { width: 208px; background: #101013; padding: 20px 12px; flex: none; }
-  #side h1 { font-size: 17px; padding: 0 10px 14px; }
-  #side button { display: block; width: 100%; text-align: left; font: inherit; color: #c9c9d2;
-    background: none; border: none; padding: 9px 10px; border-radius: 9px; cursor: pointer; }
-  #side button:hover { background: #222228; }
-  #side button.active { background: #ffb454; color: #141416; font-weight: 650; }
-  #main { flex: 1; overflow-y: auto; padding: 24px 28px; }
-  #main h2 { font-size: 19px; margin-bottom: 6px; }
-  .sub { color: #a9a9b3; font-size: 13px; margin-bottom: 14px; }
-  .row { display: flex; align-items: center; justify-content: space-between; gap: 16px;
-    padding: 12px 2px; border-bottom: 1px solid #26262c; }
-  .row small { display: block; color: #8a8a94; font-size: 12.5px; margin-top: 2px; }
-  .switch { width: 44px; height: 24px; border-radius: 12px; background: #3a3a41; border: none;
-    position: relative; flex: none; cursor: pointer; }
-  .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px;
-    border-radius: 50%; background: #eee; transition: left .15s; }
-  .switch.on { background: #ffb454; }
-  .switch.on::after { left: 23px; background: #141416; }
-  select, input[type="number"] { font: inherit; color: #fff; background: #26262b;
-    border: 1px solid #3a3a41; border-radius: 10px; padding: 6px 10px; }
-  input[type="number"] { width: 92px; }
-  .btn { background: #ffb454; color: #141416; font-weight: 650; border: none;
-    border-radius: 999px; padding: 8px 18px; cursor: pointer; font: inherit; }
-  .btn.ghost { background: #2a2a30; color: #eee; }
+  html, body { height: 100%; }
+  body { font-family: "Segoe UI", system-ui, sans-serif; background: #161618; color: #f2f2f2;
+    display: flex; -webkit-user-select: none; user-select: none; overflow: hidden; }
+  #side { width: 196px; flex: none; background: #101012; padding: 14px 10px;
+    display: flex; flex-direction: column; gap: 2px; }
+  #side .brand { display: flex; align-items: center; gap: 8px; padding: 2px 8px 12px;
+    font-weight: 700; font-size: 14px; }
+  #side .brand .dotR { width: 11px; height: 11px; border-radius: 50%; background: #ff5a52; }
+  .nav { display: flex; align-items: center; gap: 9px; padding: 7px 9px; border-radius: 9px;
+    font-size: 13px; color: #d8d8de; background: none; border: none; cursor: pointer; text-align: left; font: inherit; }
+  .nav:hover { background: #1e1e21; }
+  .nav.active { background: #26262b; color: #fff; }
+  .nav .ic { width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center;
+    font-size: 12px; color: #fff; flex: none; }
+  #main { flex: 1; padding: 20px 22px; overflow-y: auto; }
+  #main::-webkit-scrollbar { width: 8px; }
+  #main::-webkit-scrollbar-thumb { background: #33333a; border-radius: 4px; }
+  h1 { font-size: 19px; font-weight: 700; margin-bottom: 14px; }
+  .group { font-size: 11.5px; color: #8a8a94; margin: 14px 2px 7px; }
+  .group:first-of-type { margin-top: 0; }
+  .srow { display: flex; align-items: center; gap: 12px; background: #222226; border-radius: 12px;
+    padding: 11px 14px; margin-bottom: 8px; }
+  .srow .tx { flex: 1; min-width: 0; }
+  .srow .t { font-size: 13.5px; font-weight: 600; }
+  .srow .s { font-size: 12px; color: #a9a9b3; margin-top: 1px; }
+  .sw { width: 44px; height: 26px; border-radius: 999px; background: #3a3a41; position: relative;
+    cursor: pointer; flex: none; border: none; padding: 0; transition: background .15s; }
+  .sw::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px;
+    border-radius: 50%; background: #fff; transition: left .15s; }
+  .sw.on { background: #34c759; }
+  .sw.on::after { left: 21px; }
+  .seg { display: flex; background: #17171a; border-radius: 9px; padding: 2px; gap: 2px; }
+  .seg button { font: inherit; font-size: 12.5px; color: #a9a9b3; background: none; border: none;
+    border-radius: 7px; padding: 5px 11px; cursor: pointer; }
+  .seg button.on { background: #3d3d45; color: #fff; font-weight: 650; }
+  .num { width: 76px; font: inherit; font-size: 13.5px; color: #fff; background: #17171a;
+    border: 1px solid #3a3a41; border-radius: 9px; padding: 7px 10px; outline: none; text-align: right; }
+  .plainBtn { font: inherit; font-size: 13px; font-weight: 600; color: #fff; background: #3d3d45;
+    border: none; border-radius: 999px; padding: 7px 16px; cursor: pointer; flex: none; }
+  .plainBtn:hover { background: #4a4a54; }
+  .plainBtn.danger { background: #5a2326; }
+  .plainBtn.danger:hover { background: #6e2b2f; }
+  p.note { font-size: 12.5px; color: #a9a9b3; line-height: 1.55; }
 </style>
 </head>
 <body>
-<div id="side">
-  <h1>👁 Isle</h1>
-  <button data-sec="general" class="active">General</button>
-  <button data-sec="music">Music &amp; lyrics</button>
-  <button data-sec="pomodoro">Pomodoro</button>
-  <button data-sec="water">Water</button>
-  <button data-sec="shelf">Shelf</button>
-  <button data-sec="about">About</button>
-</div>
-<div id="main"></div>
+<nav id="side"></nav>
+<main id="main"></main>
 <script src="settings.js"></script>
 </body>
 </html>
