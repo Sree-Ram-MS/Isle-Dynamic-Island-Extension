@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Isle</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="notch">
+  <!-- collapsed pill -->
+  <div id="pill">
+    <span id="pillClock">--:--</span>
+    <span id="pillDate"></span>
+    <span id="pillBattery" class="chip" hidden></span>
+  </div>
+
+  <!-- expanded card -->
+  <div id="card" hidden>
+    <div id="head">
+      <span id="pageTitle">Power</span>
+      <span class="headBtns">
+        <button id="gearBtn" title="Settings">⚙</button>
+        <button id="closeBtn" title="Collapse">⌄</button>
+      </span>
+    </div>
+    <div id="pageBody"></div>
+    <div id="iconbar"></div>
+    <div id="dots"></div>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
