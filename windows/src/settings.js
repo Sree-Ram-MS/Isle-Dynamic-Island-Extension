@@ -102,10 +102,11 @@ const RENDERERS = {
     music(m) {
         m.innerHTML = `<h1>Music &amp; lyrics</h1>
           <p class="note" style="margin-bottom:10px">Music comes from the Windows media sessions — Spotify, Apple Music,
-          Windows Media Player and browsers (including YouTube) all appear automatically. Lyrics are fetched
-          from LRCLIB; only the song title, artist and length are sent.</p>
+          Windows Media Player and browsers (including YouTube) all appear automatically.
+          Lyrics provided by LRCLIB (lrclib.net), a community-contributed database; only the song title,
+          artist and length are sent.</p>
           <div class="group">Lyrics</div>`;
-        m.appendChild(row('Show lyrics', 'A second pane beside the player shows the synced line as it is sung',
+        m.appendChild(row('Show lyrics', 'From LRCLIB, a community-contributed lyrics database',
             sw(S.lyricsPill, v => set('lyricsPill', v))));
     },
     todo(m) {
@@ -145,7 +146,7 @@ const RENDERERS = {
     },
     about(m) {
         m.innerHTML = `<h1>About</h1>
-          <p class="note">Isle for Windows 0.3.1 — a living notch for the top of your screen, matched to the
+          <p class="note">Isle for Windows 0.3.2 — a living notch for the top of your screen, matched to the
           Nusa app. Part of the Isle project: the GNOME version lives on the main branch of this repository.
           Tasks, water logs, shelf items and settings are stored only on this PC, in your user folder.</p>`;
         const g = document.createElement('div');

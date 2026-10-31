@@ -107,17 +107,23 @@ async function refreshMusic() {
 async function fetchLyrics(info) {
     const key = music.key;
     try {
+        // The original queries LRCLIB's /api/search with track + artist and
+        // picks the synced result closest in duration (extracted from the
+        // app's own strings: "lrclib.net/api/search?track_name=&artist_name=").
         const q = new URLSearchParams({
             track_name: info.title || '', artist_name: info.artist || '',
-            duration: String(Math.round(info.duration || 0)),
         });
-        const r = await fetch(`https://lrclib.net/api/get?${q}`);
+        const r = await fetch(`https://lrclib.net/api/search?${q}`);
         if (!r.ok) throw new Error('no match');
-        const j = await r.json();
+        const results = await r.json();
         if (music.key !== key) return;
-        if (!j.syncedLyrics) { music.lyricsState = 'none'; }
+        const dur = info.duration || 0;
+        const candidates = (Array.isArray(results) ? results : []).filter(x => x && x.syncedLyrics);
+        candidates.sort((a, b) => Math.abs((a.duration || 0) - dur) - Math.abs((b.duration || 0) - dur));
+        const pick = candidates[0];
+        if (!pick) { music.lyricsState = 'none'; }
         else {
-            music.lines = j.syncedLyrics.split('\n').map(line => {
+            music.lines = pick.syncedLyrics.split('\n').map(line => {
                 const m = line.match(/\[(\d+):(\d+(?:\.\d+)?)\](.*)/);
                 return m ? {t: +m[1] * 60 + +m[2], text: m[3].trim()} : null;
             }).filter(l => l && l.text);
@@ -137,7 +143,7 @@ function activeLineIdx() {
     return idx;
 }
 function paneLinesHtml() {
-    if (music.lyricsState === 'loading') return '<div class="none">Looking up lyrics…</div>';
+    if (music.lyricsState === 'loading') return '<div class="none">Loading lyrics</div>';
     if (music.lyricsState !== 'ok') return '<div class="none">Lyrics not available</div>';
     const idx = activeLineIdx();
     let html = '';
