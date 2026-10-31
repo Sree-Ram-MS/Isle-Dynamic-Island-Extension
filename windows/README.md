@@ -1,58 +1,50 @@
-# Isle for Windows
+# Isle for Windows — native Rust
 
-The Windows version of **Isle** — modelled on the **Nusa** app
-([rama2555.github.io/nusa](https://rama2555.github.io/nusa/)): a small
-black notch hanging from the top edge of the screen that shows your
-music, synced lyrics, timers and files, then quietly gets out of the
-way. The GNOME Shell version lives on this repo's `main` branch; this
-`exe` branch holds the Windows app under `windows/`. It is an
-[Electron](https://www.electronjs.org/) app.
+A native Windows clone of the Nusa living notch, written in pure Rust on
+Win32/WinRT — no Electron, no WebView, no Chromium. Built for the lowest
+possible RAM and a tiny single-file `.exe` (~380 KB).
 
-## What it does (v0.2.0)
+Current version: **0.2.2**
 
-- **Hover to open, move away to close.** Page dots at the bottom, hover
-  them for the page icon bar, mouse wheel or arrow keys switch pages.
-- **Music from any player** — Spotify, Apple Music, Media Player,
-  YouTube in a browser — read from the real Windows media sessions
-  (via `scripts/gsm.ps1`), with album art, seek bar, transport controls
-  and a volume slider on the Music page.
-- **Synced lyrics** — the Lyrics button splits the notch in two: a
-  second pill shows each line as it's sung (from LRCLIB). Click a line
-  to jump there.
-- **Pomodoro** — Focus / Short / Long sessions (lengths in Settings);
-  the countdown shows in the closed notch, with a soft chime and a
-  notification at the end.
-- **Water** — Drink button with your bottle size, daily goal, an hourly
-  chart, and gentle once-an-hour reminders while you're behind.
-- **Shelf** — drag files onto the notch, drag them back out into any
-  app, click to open; text cards copy on click; Ctrl/Shift+click
-  selects several. Files are referenced, never copied.
-- **To-do with reminders** — give a task a time and the notch taps you
-  when it's due, with Snooze. Tasks can carry a colour and be edited
-  by double-clicking.
-- **Calendar** — simple month view.
-- **The mascot** — when the PC is quiet, the clock fades and a pair of
-  eyes appears; they doze off after a while and wave when you return.
-- **Popups** — plugging in the charger, losing Wi-Fi and friends show
-  briefly in the closed notch.
-- **Tray icon + Settings window** — Start with Windows, notch size,
-  Minimal notch (a thin black line), mascot, hide-in-full-screen,
-  page switches, Pomodoro durations and water goal, all applied
-  instantly.
+**Lowest possible RAM is a hard requirement:**
+- One process, one UI thread; media polled on one background thread
+- Event-driven Win32 message loop; timers only where a clock needs one
+- Media: WinRT GSMTC called directly from Rust — no PowerShell bridges
+- Release profile: opt-level=z, LTO, codegen-units=1, panic=abort, strip
 
-Not yet: volume/brightness/Caps-Lock key overlays. AI Usage
-(Antigravity) also stays a GNOME-side feature for now. No page shows
-fake data — everything is read live from the machine.
+## What it does
 
-## Run it
+- Idle: a tiny tab at the top edge of the screen; hover to open the notch.
+- **Music** — real playback via the Windows media session (GSMTC): title,
+  artist, seek bar, play/pause, next/previous, seek, synced lyrics from
+  LRCLIB in a split pane (click a line to seek), and a master volume
+  slider (Core Audio).
+- **Pomodoro** — 25 min focus / 5 min break countdown that switches
+  automatically.
+- **Water** — +250 ml towards a 1.5 L daily goal, persisted per day.
+- **Shelf** — drag files in, click to open, remove with the × button.
+- **Todo** — add, check off, edit and delete tasks.
 
-Download `Isle-0.2.0.exe` (portable — no install) and double-click it,
-or build it yourself:
+Data is stored as plain text in `%LOCALAPPDATA%\Isle\data.txt`.
+Right-click the notch or press Esc to quit.
+
+## Build
+
+Needs Rust (with the `x86_64-pc-windows-gnu` target) and mingw-w64:
 
 ```
-npm install
-npm start          # run in place
-npm run dist       # build the portable exe into dist/
+cargo build --release --target x86_64-pc-windows-gnu
 ```
 
-Data is stored in `%APPDATA%/isle-windows/isle-data.json`.
+Output: `target/x86_64-pc-windows-gnu/release/isle.exe` — a portable
+single file, just run it. (Unsigned, so Windows SmartScreen may warn on
+first run: More info → Run anyway.)
+
+## Layout
+
+- `src/main.rs` — window, rendering (GDI), pages, hit-testing
+- `src/media.rs` — WinRT media session + Core Audio volume
+- `src/lyrics.rs` — LRCLIB synced lyrics over WinHTTP
+- `src/store.rs` — plain-text persistence
+- `design/notch-design.html` — the approved HTML design prototype
+  (design reference only; the shipped app is native)

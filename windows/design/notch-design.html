@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Isle for Windows — Design Prototype v2 (matched to original)</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-font-smoothing:antialiased}
+  :root{
+    --bg:#060607; --card:#1c1c1f; --card2:#26262a; --line:#2c2c31;
+    --txt:#fff; --dim:#9d9da6; --faint:#63636c;
+    --green:#34c759; --red:#ff3b30; --blue:#0a84ff; --cyan:#32ade6;
+    --spring:cubic-bezier(.34,1.25,.4,1);
+  }
+  body{font-family:"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;color:var(--txt);
+    background:radial-gradient(1000px 480px at 20% -10%,#26355c 0%,transparent 55%),
+               radial-gradient(900px 460px at 85% -5%,#38255e 0%,transparent 50%),
+               linear-gradient(165deg,#11151f,#0a0c12 60%,#07080c);
+    min-height:100vh;overflow-x:hidden}
+  .stage{display:flex;flex-direction:column;align-items:center}
+
+  /* ============ NOTCH CARD (544 wide, pure black, content-fit height) ============ */
+  .notch{position:relative;width:544px;background:var(--bg);border-radius:0 0 30px 30px;
+    box-shadow:0 24px 60px #000000b0, inset 0 0 0 1px #ffffff0d;
+    transition:width .5s var(--spring);padding:0 26px}
+  .notch.wide{width:664px}
+  /* collapsed pill */
+  .pill{display:none;height:42px;align-items:center;justify-content:center;gap:10px;cursor:pointer}
+  .notch.collapsed{width:216px;padding:0}
+  .notch.collapsed .pill{display:flex}
+  .notch.collapsed .pagehost,.notch.collapsed .strip{display:none}
+  .pill .time{font-size:16px;font-weight:700;letter-spacing:.2px}
+  .bolt{width:20px;height:20px;border-radius:50%;background:var(--green);display:grid;place-items:center;flex:none}
+  .bolt svg{width:11px;height:11px}
+  .bolt.sm{width:17px;height:17px}.bolt.sm svg{width:9px;height:9px}
+
+  /* status strip — every expanded page */
+  .strip{height:38px;display:flex;align-items:center;position:relative;margin:0 -6px}
+  .strip .pagetitle{font-size:15px;font-weight:650;white-space:nowrap}
+  .strip .pagetitle .grad{background:linear-gradient(90deg,#32ade6,#0a84ff);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .strip .pagetitle .grn{color:var(--green)}
+  .strip .centre{position:absolute;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:7px;white-space:nowrap}
+  .strip .centre .date{font-size:13px;color:#e8e8ec}
+  .strip .centre .time{font-size:13.5px;font-weight:750}
+  .strip .right{margin-left:auto;display:flex;align-items:center}
+  .bellpill{width:44px;height:26px;border-radius:99px;background:var(--card2);border:0;display:grid;place-items:center;cursor:pointer;font-size:13px}
+  .bellplain{position:relative;background:none;border:0;font-size:16px;cursor:pointer;color:#fff}
+  .bellplain i{position:absolute;top:-1px;right:-2px;width:7px;height:7px;border-radius:50%;background:var(--red)}
+
+  /* chevrons + dots */
+  .chev{position:absolute;top:50%;transform:translateY(-50%);width:27px;height:27px;border-radius:50%;
+    background:#232327;border:0;color:#c9c9d1;font-size:15px;cursor:pointer;display:grid;place-items:center;z-index:5}
+  .chev:hover{background:#303036;color:#fff}
+  .chev.prev{left:9px}.chev.next{right:9px}
+  .notch.collapsed .chev{display:none}
+  .dots{display:flex;gap:6px;justify-content:center;align-items:center;height:22px;padding-bottom:7px}
+  .dots span{width:5px;height:5px;border-radius:99px;background:#43434b;transition:all .3s}
+  .dots span.on{width:19px;background:#fff}
+  .notch.collapsed .dots{display:none}
+
+  .page{display:none;padding:2px 8px 6px;animation:rise .35s var(--spring)}
+  .page.on{display:block}
+  @keyframes rise{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+
+  /* MUSIC */
+  .m-art{width:88px;height:88px;border-radius:16px;background:#26262b;display:grid;place-items:center;flex:none}
+  .m-art span{font-size:36px;color:#8e8e98}
+  .m-art.playing{background:conic-gradient(from 210deg,#19b8ff,#2d5bff,#7b4bff,#ff5a9e,#19b8ff);box-shadow:0 8px 22px #2d5bff40}
+  .m-art.playing span{color:#fff}
+  .m-head{display:flex;gap:18px;align-items:center;padding:8px 4px 0}
+  .m-title{font-size:20px;font-weight:700}
+  .m-artist{font-size:13.5px;color:var(--dim);margin-top:3px;display:none}
+  .m-seek{display:flex;align-items:center;gap:12px;margin-top:20px;padding:0 4px}
+  .m-seek .t{font-size:13px;color:var(--dim);font-variant-numeric:tabular-nums;min-width:36px}
+  .m-seek .t:last-child{text-align:right}
+  .m-bar{flex:1;height:5px;border-radius:99px;background:#2b2b31;position:relative;cursor:pointer}
+  .m-bar i{position:absolute;left:0;top:0;bottom:0;width:0%;border-radius:99px;background:#e9e9ee}
+  .m-bottom{display:flex;align-items:center;margin-top:16px;padding:0 6px}
+  .m-bottom .lyr{background:none;border:0;color:#8e8e98;font-size:19px;cursor:pointer;visibility:hidden}
+  .m-bottom .lyr.show{visibility:visible}
+  .m-controls{display:flex;gap:34px;align-items:center;margin:0 auto}
+  .m-controls button{background:none;border:0;color:#d7d7de;font-size:19px;cursor:pointer}
+  .m-controls button:hover{color:#fff}
+  .m-vol{background:none;border:0;color:#d7d7de;font-size:18px;cursor:pointer}
+  /* lyrics split pane */
+  .lyrics-split{display:none;gap:0;margin:4px -14px 2px;border-radius:18px;overflow:hidden}
+  .notch.lyrics .lyrics-split{display:flex}
+  .notch.lyrics .m-main{display:none}
+  .ly-left{width:270px;flex:none;padding:14px 16px}
+  .ly-right{flex:1;background:linear-gradient(150deg,#3d1220,#1c0810 65%);padding:16px 18px;text-align:center;border-left:1px solid #ffffff10}
+  .ly-right p{font-size:13.5px;color:#977d88;line-height:2.05;font-weight:550;cursor:pointer}
+  .ly-right p.cur{color:#fff;font-size:15.5px;font-weight:700}
+  .ly-close{margin-top:10px;background:#ffffff14;border:0;color:#fff;border-radius:99px;padding:6px 14px;font-size:12px;cursor:pointer}
+
+  /* POMODORO */
+  .pomo{display:flex;gap:30px;align-items:center;padding:6px 10px 2px}
+  .pomo-icon{width:112px;height:112px;border-radius:50%;flex:none;display:grid;place-items:center;
+    background:radial-gradient(circle at 50% 42%,#ff6b61,#e8251b 62%,#a30f0f);
+    box-shadow:0 0 0 7px #ff3b3026,0 0 44px #ff3b3066, inset 0 -10px 22px #00000038;font-size:52px;color:#fff}
+  .pomo-right{flex:1;text-align:center}
+  .pomo-time{display:flex;align-items:center;justify-content:center;gap:14px}
+  .pomo-time b{font-size:41px;font-weight:750;font-variant-numeric:tabular-nums;letter-spacing:.5px}
+  .pomo-time .reset{background:none;border:0;color:#d7d7de;font-size:21px;cursor:pointer}
+  .pomo-mode{color:var(--dim);font-size:14px;margin-top:1px}
+  .pomo-actions{display:flex;gap:9px;justify-content:center;margin-top:15px}
+  .pomo-actions .mode{background:#26262b;border:0;color:#e8e8ec;border-radius:99px;padding:9px 16px;font-size:13px;cursor:pointer;display:flex;gap:7px;align-items:center}
+  .pomo-actions .mode.on{background:#3a3a41}
+  .pomo-actions .play{background:var(--red);border:0;color:#fff;border-radius:99px;padding:9px 26px;font-size:14px;cursor:pointer;box-shadow:0 8px 20px #ff3b3038}
+
+  /* WATER */
+  .water{display:flex;gap:26px;padding:4px 10px 2px}
+  .w-left{flex:1.15}
+  .w-amt{font-size:37px;font-weight:750;font-variant-numeric:tabular-nums}
+  .w-amt span{font-size:16px;color:var(--dim);font-weight:500}
+  .w-bar{height:6px;background:#26262b;border-radius:99px;margin:10px 0 9px;overflow:hidden}
+  .w-bar i{display:block;height:100%;width:0%;background:linear-gradient(90deg,#32ade6,#0a84ff);border-radius:99px;transition:width .5s var(--spring)}
+  .w-sub{font-size:12.5px;color:var(--dim)}
+  .w-btns{display:flex;gap:9px;margin-top:14px}
+  .w-btns button{border:0;border-radius:99px;padding:9px 18px;font-size:13.5px;cursor:pointer;background:#26262b;color:#fff;display:flex;gap:8px;align-items:center}
+  .w-btns .drink{color:#7cc4ff}
+  .w-gauge{flex:.85;display:grid;place-items:center}
+  .gauge{position:relative;width:118px;height:118px}
+  .gauge svg{transform:rotate(135deg)}
+  .gauge .gv{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
+  .gauge .gv b{font-size:31px;line-height:1}
+  .gauge .gv small{color:var(--dim);font-size:12px;margin-top:3px}
+
+  /* SHELF */
+  .shelf-drop{border:1.7px dashed #3d3d46;border-radius:18px;margin:6px 4px 2px;padding:24px 16px 20px;text-align:center;transition:all .25s}
+  .shelf-drop.over{border-color:var(--cyan);background:#32ade612}
+  .shelf-drop .ic{font-size:30px;color:#c9c9d1}
+  .shelf-drop .a{font-size:16.5px;font-weight:650;margin-top:8px}
+  .shelf-drop .b{font-size:12.5px;color:var(--dim);margin-top:4px}
+  .shelf-files{display:none;margin:8px 4px 0;flex-direction:column;gap:7px}
+  .shelf-files.show{display:flex}
+  .sfile{display:flex;gap:10px;align-items:center;background:var(--card);border-radius:11px;padding:8px 12px;font-size:13px}
+  .sfile small{color:var(--faint);margin-left:auto}
+
+  /* TODO */
+  .todo{display:flex;gap:22px;padding:4px 10px 2px}
+  .t-left{flex:1}
+  .t-count{display:flex;align-items:center;gap:14px}
+  .t-count b{font-size:43px;font-weight:750;font-variant-numeric:tabular-nums}
+  .t-cal{width:37px;height:37px;border-radius:50%;background:#26262b;border:0;color:#fff;font-size:16px;cursor:pointer;position:relative}
+  .t-cal i{position:absolute;top:5px;right:6px;width:7px;height:7px;border-radius:50%;background:var(--blue)}
+  .t-sub{color:var(--dim);font-size:13.5px;margin-top:2px}
+  .t-btns{display:flex;gap:9px;margin-top:14px}
+  .t-btns button{background:#26262b;border:0;color:#fff;border-radius:99px;padding:9px 16px;font-size:13px;cursor:pointer}
+  .t-panel{flex:1.05;background:#1b1b1e;border-radius:18px;min-height:128px;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:9px;padding:12px}
+  .t-panel .ic{font-size:29px;color:#55555f}
+  .t-panel .none{color:var(--dim);font-size:13.5px}
+  .t-list{width:100%;display:none;flex-direction:column;gap:7px}
+  .t-list.show{display:flex}
+  .task{display:flex;gap:9px;align-items:center;background:#26262b;border-radius:11px;padding:9px 12px;font-size:13px;cursor:pointer;width:100%}
+  .task.done{background:#34c7592b;text-decoration:line-through;opacity:.75}
+  .task .x{margin-left:auto;background:none;border:0;color:#ff6b61;cursor:pointer;display:none}
+  .editing .task .x{display:block}
+  .t-add{display:none;width:100%;margin-top:8px;background:#26262b;border:1px solid var(--line);border-radius:11px;
+    padding:9px 12px;color:#fff;font-size:13px;outline:none}
+  .t-add.show{display:block}
+
+  /* icon bar (hover the notch to reveal) */
+  .iconbar{margin-top:12px;background:#2b2b30;border-radius:99px;padding:9px 16px;display:flex;gap:19px;align-items:center;
+    box-shadow:0 14px 34px #00000090;opacity:0;transform:translateY(-5px);pointer-events:none;transition:all .3s var(--spring)}
+  .stage:hover .iconbar,.iconbar:hover{opacity:1;transform:none;pointer-events:auto}
+  .iconbar button{background:none;border:0;font-size:17px;cursor:pointer;color:#e8e8ec;opacity:.85}
+  .iconbar button:hover{opacity:1;transform:scale(1.14)}
+  .iconbar button.on{opacity:1;filter:drop-shadow(0 0 6px #ffffff70)}
+  .iconbar .sep{width:1px;height:19px;background:#ffffff2b}
+  .iconbar .drop-ic{color:#32ade6}
+
+  /* ============ DECK ============ */
+  .deck{margin:44px auto 26px;width:min(900px,94vw);background:#0d0f16e6;border:1px solid #ffffff13;border-radius:20px;padding:22px 26px;position:relative;z-index:2}
+  .deck h1{font-size:20px}.deck h1 span{background:linear-gradient(90deg,#32ade6,#7b4bff);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .deck p{color:var(--dim);font-size:13.5px;line-height:1.6;margin-top:7px}
+  .deck p b{color:#fff}
+  .deck .row{display:flex;flex-wrap:wrap;gap:8px;margin-top:15px;align-items:center}
+  .deck .row button{background:#171a26;border:1px solid #ffffff1d;color:#cfd6e4;padding:8px 15px;border-radius:99px;font-size:12.5px;cursor:pointer}
+  .deck .row button:hover{color:#fff;border-color:#ffffff45}
+  .deck .row button.on{background:#fff;color:#000;font-weight:650}
+  .deck .lbl{font-size:11px;color:var(--faint);letter-spacing:1px;text-transform:uppercase;margin-right:2px}
+
+  /* ============ SETTINGS WINDOW ============ */
+  .settings{margin:6px auto 70px;width:854px;max-width:94vw;height:640px;background:#19191c;border-radius:18px;
+    display:none;overflow:hidden;box-shadow:0 34px 90px #000000b5;border:1px solid #ffffff10;position:relative;z-index:2}
+  .settings.open{display:flex}
+  .s-side{width:252px;flex:none;background:#111113;padding:16px 12px;display:flex;flex-direction:column;gap:3px}
+  .s-close{width:13px;height:13px;border-radius:50%;background:#ff5f57;margin:0 0 14px 6px;cursor:pointer}
+  .s-item{display:flex;align-items:center;gap:11px;padding:8px 10px;border-radius:10px;font-size:14px;color:#e8e8ec;cursor:pointer;border:0;background:none;text-align:left;width:100%}
+  .s-item:hover{background:#ffffff0a}
+  .s-item.on{background:#26262b}
+  .s-item .chip{width:27px;height:27px;border-radius:8px;display:grid;place-items:center;font-size:14px;flex:none}
+  .s-item .pro{margin-left:auto;font-size:9.5px;font-weight:800;letter-spacing:.6px;color:#fff;
+    background:linear-gradient(90deg,#2d5bff,#7b4bff);padding:2.5px 7px;border-radius:99px}
+  .s-item.about{margin-top:auto}
+  .s-main{flex:1;padding:26px 30px;overflow-y:auto}
+  .s-main h2{font-size:23px;font-weight:750;margin-bottom:20px}
+  .s-group{font-size:13px;color:var(--dim);margin:18px 0 8px}
+  .s-group:first-of-type{margin-top:0}
+  .s-card{background:#222226;border-radius:15px;padding:6px 18px}
+  .s-row{display:flex;align-items:center;gap:14px;padding:13px 0;border-bottom:1px solid #ffffff09}
+  .s-row:last-child{border-bottom:0}
+  .s-row .tx{flex:1}.s-row .tx b{font-size:14.5px;font-weight:600;display:block}
+  .s-row .tx small{color:var(--dim);font-size:12.5px;display:block;margin-top:2px;line-height:1.45}
+  .switch{width:46px;height:27px;border-radius:99px;background:#3d3d44;border:0;cursor:pointer;position:relative;flex:none;transition:background .25s}
+  .switch::after{content:"";position:absolute;top:2.5px;left:3px;width:22px;height:22px;border-radius:50%;background:#fff;transition:left .25s var(--spring);box-shadow:0 2px 6px #0007}
+  .switch.on{background:var(--green)} .switch.on::after{left:21px}
+  .seg{display:flex;background:#17171a;border-radius:10px;padding:3px;gap:2px}
+  .seg button{border:0;background:none;color:var(--dim);font-size:12.5px;padding:6px 0;flex:1;border-radius:8px;cursor:pointer;min-width:56px}
+  .seg button.on{background:#48484f;color:#fff;font-weight:600}
+  .s-note{display:none;background:#222226;border-radius:15px;padding:22px;font-size:14px;color:var(--dim);line-height:1.6}
+  .s-note.show{display:block}
+</style>
+</head>
+<body>
+<div class="stage" id="stage">
+
+  <!-- ================= NOTCH ================= -->
+  <div class="notch" id="notch">
+    <div class="pill" id="pill">
+      <span class="bolt"><svg viewBox="0 0 24 24" fill="white"><path d="M13 2 4.5 13.5H11L9.5 22 19 10h-6.5L13 2z"/></svg></span>
+      <span class="time" id="pillTime">12:21 AM</span>
+    </div>
+
+    <div class="strip">
+      <span class="pagetitle" id="pageTitle"></span>
+      <span class="centre">
+        <span class="bolt sm"><svg viewBox="0 0 24 24" fill="white"><path d="M13 2 4.5 13.5H11L9.5 22 19 10h-6.5L13 2z"/></svg></span>
+        <span class="date" id="stripDate">Sun 1 Nov 2026</span>
+        <span class="time" id="stripTime">12:22 AM</span>
+      </span>
+      <span class="right" id="stripRight"></span>
+    </div>
+
+    <button class="chev prev" id="chevPrev">‹</button>
+    <button class="chev next" id="chevNext">›</button>
+
+    <div class="pagehost">
+      <!-- MUSIC -->
+      <section class="page" data-page="music">
+        <div class="m-main">
+          <div class="m-head">
+            <div class="m-art" id="mArt"><span>♫</span></div>
+            <div>
+              <div class="m-title" id="mTitle">Not Playing</div>
+              <div class="m-artist" id="mArtist">Neon Coastline — Afterglow</div>
+            </div>
+          </div>
+          <div class="m-seek">
+            <span class="t" id="mElapsed">00:00</span>
+            <div class="m-bar" id="mBar"><i id="mFill"></i></div>
+            <span class="t" id="mRemain">-00:00</span>
+          </div>
+          <div class="m-bottom">
+            <button class="lyr" id="lyrBtn" title="Lyrics">💬</button>
+            <div class="m-controls">
+              <button id="mPrev">⏮</button><button id="mPlay">▶</button><button id="mNext">⏭</button>
+            </div>
+            <button class="m-vol" id="mVol">🔊</button>
+          </div>
+        </div>
+        <div class="lyrics-split">
+          <div class="ly-left">
+            <div class="m-head" style="padding:0">
+              <div class="m-art playing" style="width:56px;height:56px;border-radius:12px"><span style="font-size:23px">♫</span></div>
+              <div><div class="m-title" style="font-size:15.5px">Midnight City Lights</div>
+              <div class="m-artist" style="display:block">Neon Coastline</div></div>
+            </div>
+            <div class="m-seek" style="margin-top:14px"><span class="t">01:12</span><div class="m-bar"><i style="width:32%"></i></div><span class="t">-02:33</span></div>
+            <div class="m-controls" style="margin-top:14px"><button>⏮</button><button id="lyPlay">⏸</button><button>⏭</button></div>
+          </div>
+          <div class="ly-right" id="lyBox">
+            <p>We were running from the daylight</p>
+            <p class="cur">Chasing all the midnight city lights</p>
+            <p>Your hand in mine, the radio low</p>
+            <p>Nowhere else that we need to go</p>
+            <button class="ly-close" id="lyClose">Close lyrics</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- POMODORO -->
+      <section class="page" data-page="pomodoro">
+        <div class="pomo">
+          <div class="pomo-icon">⏱</div>
+          <div class="pomo-right">
+            <div class="pomo-time"><b id="pomoTime">25:00</b><button class="reset" id="pomoReset" title="Reset">↺</button></div>
+            <div class="pomo-mode" id="pomoMode">Focus time</div>
+            <div class="pomo-actions">
+              <button class="mode" data-mins="5" data-label="Break time">☕ Short Break</button>
+              <button class="play" id="pomoPlay">▶</button>
+              <button class="mode on" data-mins="25" data-label="Focus time">◎ Focus Time</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- WATER -->
+      <section class="page" data-page="water">
+        <div class="water">
+          <div class="w-left">
+            <div class="w-amt"><span id="wAmt">0.0</span> <span>/ 1.5 L</span></div>
+            <div class="w-bar"><i id="wFill"></i></div>
+            <div class="w-sub">Today · <span id="wPctT">0%</span> · <span id="wRemind">Reminders off</span></div>
+            <div class="w-btns">
+              <button class="drink" id="wDrink">💧 Drink</button>
+              <button id="wSettings">⚙ Settings</button>
+            </div>
+          </div>
+          <div class="w-gauge">
+            <div class="gauge">
+              <svg width="118" height="118">
+                <circle cx="59" cy="59" r="50" stroke="#26262b" stroke-width="9" fill="none" stroke-linecap="round" stroke-dasharray="235.6 314.2"/>
+                <circle id="wArc" cx="59" cy="59" r="50" stroke="#0a84ff" stroke-width="9" fill="none" stroke-linecap="round" stroke-dasharray="0 314.2"/>
+              </svg>
+              <div class="gv"><b id="wPct">0</b><small>💧 %</small></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- SHELF -->
+      <section class="page" data-page="shelf">
+        <div class="shelf-drop" id="shelfDrop">
+          <div class="ic">📥</div>
+          <div class="a">Drop files here</div>
+          <div class="b">Drag out anytime · click to open or copy</div>
+        </div>
+        <div class="shelf-files" id="shelfFiles"></div>
+      </section>
+
+      <!-- TODO -->
+      <section class="page" data-page="todo">
+        <div class="todo">
+          <div class="t-left">
+            <div class="t-count"><b id="tCount">0/0</b><button class="t-cal">📅<i></i></button></div>
+            <div class="t-sub">Task Done Today</div>
+            <div class="t-btns">
+              <button id="tAddBtn">＋ Add Task</button>
+              <button id="tEditBtn">✎ Edit Task</button>
+            </div>
+          </div>
+          <div class="t-panel" id="tPanel">
+            <div class="ic" id="tEmptyIc">🗒️</div>
+            <div class="none" id="tEmptyTx">No tasks.</div>
+            <div class="t-list" id="tList"></div>
+            <input class="t-add" id="tAdd" placeholder="Task title + Enter">
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="dots" id="dots"></div>
+  </div>
+
+  <!-- icon bar -->
+  <div class="iconbar" id="iconbar">
+    <button data-go="music" title="Music">♪</button>
+    <button data-go="pomodoro" title="Pomodoro">⏱</button>
+    <button data-go="water" class="drop-ic" title="Water">💧</button>
+    <button data-go="shelf" title="Shelf">📥</button>
+    <button data-go="todo" title="To-do">☑</button>
+    <span class="sep"></span>
+    <button id="gearBtn" title="Settings">⚙</button>
+  </div>
+
+  <!-- ================= DECK ================= -->
+  <div class="deck">
+    <h1>Design v2 — <span>matched to your screenshots, page by page</span></h1>
+    <p>Yes, exactly like this. I rebuilt the prototype from your 8 screenshots: the collapsed pill (green bolt + <b>12:21 AM</b>),
+       every page's status strip (page name left · bolt + <b>Sun 1 Nov 2026</b> + bold time centre · action right), the side
+       <b>‹ ›</b> chevrons, the elongated active dot, the hover icon bar, and the full Settings window below.
+       Music opens in its real <b>Not Playing</b> state — use the demo button to see the playing state and the red lyrics split-pane.
+       Click the pill to collapse, hover the notch to reveal the icon bar, ⚙ opens Settings.</p>
+    <div class="row"><span class="lbl">Pages</span><span id="deckPages"></span></div>
+    <div class="row"><span class="lbl">Demo</span>
+      <button id="demoSong">▶ Simulate a song playing</button>
+      <button id="collapseBtn">Collapse to pill</button>
+      <button id="settingsBtn">Open Settings window</button>
+    </div>
+  </div>
+
+  <!-- ================= SETTINGS ================= -->
+  <div class="settings" id="settings">
+    <div class="s-side">
+      <span class="s-close" id="sClose"></span>
+      <div id="sideItems"></div>
+      <button class="s-item about" data-sec="about"><span class="chip" style="background:#3a3a41">ℹ️</span>About</button>
+    </div>
+    <div class="s-main">
+      <h2 id="sTitle">General</h2>
+      <div id="generalBody">
+        <div class="s-group">Startup</div>
+        <div class="s-card"><div class="s-row"><div class="tx"><b>Start with Windows</b></div><button class="switch" data-sw></button></div></div>
+
+        <div class="s-group">Notch</div>
+        <div class="s-card">
+          <div class="s-row"><div class="tx"><b>Size</b><small>Nusa restarts to apply the new size</small></div>
+            <div class="seg" id="sizeSeg"><button class="on">Auto</button><button>100%</button><button>115%</button><button>130%</button><button>150%</button></div></div>
+          <div class="s-row"><div class="tx"><b>Minimal notch</b><small>A smaller pill when nothing is playing</small></div><button class="switch" data-sw></button></div>
+          <div class="s-row"><div class="tx"><b>Nusa mascot</b><small>A little friend that lives in the notch</small></div><button class="switch on" data-sw></button></div>
+        </div>
+
+        <div class="s-group">Sounds</div>
+        <div class="s-card"><div class="s-row"><div class="tx"><b>Reminder sounds</b><small>Chimes for Pomodoro, To-do and Water</small></div><button class="switch on" data-sw></button></div></div>
+
+        <div class="s-group">Full screen</div>
+        <div class="s-card"><div class="s-row"><div class="tx"><b>Hide in full screen</b><small>Games, videos and slides that fill the screen</small></div><button class="switch on" data-sw></button></div></div>
+      </div>
+      <div class="s-note" id="sNote">This section isn't designed yet — share its screenshot from the original like you did for General, and I'll match it exactly here before we build it.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const PAGES = [
+    {id:'music',    title:'',                             right:''},
+    {id:'pomodoro', title:'Pomodoro',                     right:''},
+    {id:'water',    title:'<span class="grad">Water</span> Reminder', right:'<button class="bellpill" id="wBell">🔔</button>'},
+    {id:'shelf',    title:'Shelf',                        right:'<button class="bellplain">🔔<i></i></button>'},
+    {id:'todo',     title:'Todo<span class="grn">List</span>', right:''},
+  ];
+  let cur = 0, playing = false;
+  const notch = document.getElementById('notch');
+
+  function fmtClock(d){ let h = d.getHours(), ap = h >= 12 ? 'PM' : 'AM'; h = h % 12 || 12;
+    return h + ':' + String(d.getMinutes()).padStart(2,'0') + ' ' + ap; }
+  function tick(){ const d = new Date();
+    const days=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'], mons=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    document.getElementById('stripDate').textContent = `${days[d.getDay()]} ${d.getDate()} ${mons[d.getMonth()]} ${d.getFullYear()}`;
+    document.getElementById('stripTime').textContent = fmtClock(d);
+    document.getElementById('pillTime').textContent = fmtClock(d); }
+  tick(); setInterval(tick, 5000);
+
+  function go(i){
+    cur = (i + PAGES.length) % PAGES.length;
+    const p = PAGES[cur];
+    notch.classList.remove('collapsed','lyrics'); notch.classList.toggle('wide', false);
+    document.getElementById('pageTitle').innerHTML = p.title;
+    document.getElementById('stripRight').innerHTML = p.right;
+    document.querySelectorAll('.page').forEach(s => s.classList.toggle('on', s.dataset.page === p.id));
+    document.getElementById('dots').innerHTML = PAGES.map((_,j) => `<span class="${j===cur?'on':''}"></span>`).join('');
+    document.querySelectorAll('#iconbar button[data-go]').forEach(b => b.classList.toggle('on', b.dataset.go === p.id));
+    document.querySelectorAll('#deckPages button').forEach((b,j) => b.classList.toggle('on', j === cur));
+    const wb = document.getElementById('wBell');
+    if (wb) wb.onclick = () => { reminders = !reminders;
+      document.getElementById('wRemind').textContent = reminders ? 'Reminders on' : 'Reminders off'; };
+  }
+  document.getElementById('chevPrev').onclick = () => go(cur - 1);
+  document.getElementById('chevNext').onclick = () => go(cur + 1);
+  document.getElementById('iconbar').addEventListener('click', e => {
+    const b = e.target.closest('button[data-go]'); if (b) go(PAGES.findIndex(p => p.id === b.dataset.go)); });
+
+  const dp = document.getElementById('deckPages');
+  PAGES.forEach((p,j) => { const b = document.createElement('button');
+    b.textContent = p.id[0].toUpperCase() + p.id.slice(1); b.onclick = () => go(j); dp.appendChild(b); });
+
+  /* collapse / expand */
+  document.getElementById('collapseBtn').onclick = () => notch.classList.add('collapsed');
+  document.getElementById('pill').onclick = () => go(cur);
+
+  /* ---- music ---- */
+  let pos = 0, DUR = 225, timer = null;
+  const fmt = s => String(Math.floor(s/60)).padStart(2,'0') + ':' + String(Math.floor(s%60)).padStart(2,'0');
+  function renderMusic(){
+    document.getElementById('mElapsed').textContent = fmt(pos);
+    document.getElementById('mRemain').textContent = '-' + fmt(Math.max(0, DUR - pos));
+    document.getElementById('mFill').style.width = (playing ? pos/DUR*100 : 0) + '%';
+    document.getElementById('mPlay').textContent = playing ? '⏸' : '▶';
+  }
+  function setPlaying(v){
+    playing = v;
+    document.getElementById('mTitle').textContent = v ? 'Midnight City Lights' : 'Not Playing';
+    document.getElementById('mArtist').style.display = v ? 'block' : 'none';
+    document.getElementById('mArt').classList.toggle('playing', v);
+    document.getElementById('lyrBtn').classList.toggle('show', v);
+    document.getElementById('demoSong').textContent = v ? '⏹ Stop the demo song' : '▶ Simulate a song playing';
+    clearInterval(timer);
+    if (v){ pos = 72; timer = setInterval(() => { pos = (pos + 1) % DUR; renderMusic(); }, 1000); }
+    if (!v){ notch.classList.remove('lyrics','wide'); pos = 0; }
+    renderMusic();
+  }
+  document.getElementById('demoSong').onclick = () => { go(0); setPlaying(!playing); };
+  document.getElementById('mPlay').onclick = () => { if (document.getElementById('mTitle').textContent !== 'Not Playing') setPlaying(!playing); };
+  document.getElementById('mBar').onclick = e => { if (!playing) return;
+    const r = e.currentTarget.getBoundingClientRect(); pos = Math.floor((e.clientX - r.left)/r.width * DUR); renderMusic(); };
+  document.getElementById('lyrBtn').onclick = () => { notch.classList.add('lyrics','wide'); };
+  document.getElementById('lyClose').onclick = () => { notch.classList.remove('lyrics','wide'); };
+  document.getElementById('lyPlay').onclick = () => setPlaying(!playing);
+  renderMusic();
+
+  /* ---- pomodoro ---- */
+  let pomoSecs = 1500, pomoTimer = null;
+  const pFmt = s => String(Math.floor(s/60)).padStart(2,'0') + ':' + String(s%60).padStart(2,'0');
+  function pomoRender(){ document.getElementById('pomoTime').textContent = pFmt(pomoSecs); }
+  document.getElementById('pomoPlay').onclick = e => {
+    if (pomoTimer){ clearInterval(pomoTimer); pomoTimer = null; e.target.textContent = '▶'; return; }
+    e.target.textContent = '⏸';
+    pomoTimer = setInterval(() => { if (pomoSecs > 0){ pomoSecs--; pomoRender(); } }, 1000); };
+  document.getElementById('pomoReset').onclick = () => { clearInterval(pomoTimer); pomoTimer = null;
+    document.getElementById('pomoPlay').textContent = '▶';
+    pomoSecs = parseInt(document.querySelector('.pomo-actions .mode.on').dataset.mins) * 60; pomoRender(); };
+  document.querySelectorAll('.pomo-actions .mode').forEach(b => b.onclick = () => {
+    document.querySelectorAll('.pomo-actions .mode').forEach(x => x.classList.remove('on'));
+    b.classList.add('on'); pomoSecs = parseInt(b.dataset.mins) * 60;
+    document.getElementById('pomoMode').textContent = b.dataset.label; pomoRender(); });
+
+  /* ---- water ---- */
+  let litres = 0, reminders = false;
+  function waterRender(){ const pct = Math.round(litres / 1.5 * 100);
+    document.getElementById('wAmt').textContent = litres.toFixed(1);
+    document.getElementById('wFill').style.width = pct + '%';
+    document.getElementById('wPct').textContent = pct;
+    document.getElementById('wPctT').textContent = pct + '%';
+    document.getElementById('wArc').setAttribute('stroke-dasharray', (235.6 * pct / 100) + ' 314.2'); }
+  document.getElementById('wDrink').onclick = () => { litres = Math.min(1.5, litres + 0.25); waterRender(); };
+  document.getElementById('wSettings').onclick = () => openSettings('water');
+  waterRender();
+
+  /* ---- shelf ---- */
+  const drop = document.getElementById('shelfDrop'), sFiles = document.getElementById('shelfFiles');
+  ['dragover','dragenter'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
+  drop.addEventListener('drop', e => { [...e.dataTransfer.files].forEach(f => addFile(f.name, (f.size/1024).toFixed(1) + ' KB')); });
+  function addFile(name, size){ sFiles.classList.add('show');
+    const d = document.createElement('div'); d.className = 'sfile';
+    d.innerHTML = '📄 <span></span><small></small>'; d.children[0].textContent = name; d.querySelector('small').textContent = size;
+    sFiles.appendChild(d); drop.style.padding = '13px 16px 10px'; }
+
+  /* ---- todo ---- */
+  let tasks = [], editing = false;
+  const tList = document.getElementById('tList');
+  function todoRender(){
+    const done = tasks.filter(t => t.done).length;
+    document.getElementById('tCount').textContent = done + '/' + tasks.length;
+    document.getElementById('tEmptyIc').style.display = tasks.length ? 'none' : '';
+    document.getElementById('tEmptyTx').style.display = tasks.length ? 'none' : '';
+    tList.classList.toggle('show', tasks.length > 0);
+    tList.innerHTML = '';
+    tasks.forEach((t, i) => { const d = document.createElement('div');
+      d.className = 'task' + (t.done ? ' done' : '');
+      d.innerHTML = (t.done ? '✅ ' : '⬜ ') + '<span></span><button class="x">✕</button>';
+      d.querySelector('span').textContent = t.title;
+      d.onclick = () => { t.done = !t.done; todoRender(); };
+      d.querySelector('.x').onclick = e => { e.stopPropagation(); tasks.splice(i, 1); todoRender(); };
+      tList.appendChild(d); });
+  }
+  document.getElementById('tAddBtn').onclick = () => { const inp = document.getElementById('tAdd');
+    inp.classList.toggle('show'); inp.focus(); };
+  document.getElementById('tAdd').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && e.target.value.trim()){ tasks.push({title:e.target.value.trim(), done:false});
+      e.target.value = ''; e.target.classList.remove('show'); todoRender(); } });
+  document.getElementById('tEditBtn').onclick = () => { editing = !editing;
+    document.getElementById('tPanel').classList.toggle('editing', editing); };
+  todoRender();
+
+  /* ---- settings ---- */
+  const SECTIONS = [
+    ['general','⚙️','#3a3a41','General',''], ['display','🖥️','#5e3fd6','Display','PRO'],
+    ['appearance','🌗','#26262b','Appearance','PRO'], ['music','🎵','#d6336c','Music and lyrics',''],
+    ['todo','✅','#1f9d4d','To-do',''], ['calendar','📅','#e8251b','Calendar','PRO'],
+    ['pomodoro','⏱️','#e8720c','Pomodoro','PRO'], ['water','💧','#0a84ff','Water',''],
+    ['shelf','📁','#c77f0a','Shelf',''], ['hud','🔔','#0a84ff','HUD & popups','PRO'],
+  ];
+  const side = document.getElementById('sideItems');
+  SECTIONS.forEach(([id, ic, bg, name, pro]) => { const b = document.createElement('button');
+    b.className = 's-item' + (id === 'general' ? ' on' : ''); b.dataset.sec = id;
+    b.innerHTML = `<span class="chip" style="background:${bg}">${ic}</span>${name}${pro ? '<span class="pro">PRO</span>' : ''}`;
+    side.appendChild(b); });
+  function openSettings(sec){
+    document.getElementById('settings').classList.add('open');
+    selectSection(sec || 'general');
+    document.getElementById('settings').scrollIntoView({behavior:'smooth', block:'center'});
+  }
+  function selectSection(id){
+    document.querySelectorAll('.s-item').forEach(b => b.classList.toggle('on', b.dataset.sec === id));
+    const found = SECTIONS.find(s => s[0] === id);
+    document.getElementById('sTitle').textContent = id === 'about' ? 'About' : (found ? found[3] : 'General');
+    const isGeneral = id === 'general';
+    document.getElementById('generalBody').style.display = isGeneral ? '' : 'none';
+    document.getElementById('sNote').classList.toggle('show', !isGeneral);
+  }
+  side.addEventListener('click', e => { const b = e.target.closest('.s-item'); if (b) selectSection(b.dataset.sec); });
+  document.querySelector('.s-item.about').onclick = () => selectSection('about');
+  document.querySelectorAll('[data-sw]').forEach(sw => sw.onclick = () => sw.classList.toggle('on'));
+  document.getElementById('sizeSeg').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return;
+    document.querySelectorAll('#sizeSeg button').forEach(x => x.classList.remove('on')); b.classList.add('on'); });
+  document.getElementById('gearBtn').onclick = () => openSettings('general');
+  document.getElementById('settingsBtn').onclick = () => openSettings('general');
+  document.getElementById('sClose').onclick = () => document.getElementById('settings').classList.remove('open');
+
+  go(0);
+</script>
+</body>
+</html>
