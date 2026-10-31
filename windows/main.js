@@ -1,24 +1,19 @@
 // Isle for Windows — main process.
-// A floating notch pill (always on top, no taskbar button) that expands to
-// the same pages as the GNOME extension: Power, Hardware, Calendar, Todo,
-// Focus, Water, Shelf, Wallpaper — plus a Settings view. All data is real:
-// battery from Chromium's Battery API in the renderer, CPU/RAM/disk from
-// Node's os/fs in here, wallpapers from the real Windows wallpaper folders,
-// applied through user32 SystemParametersInfo.
+// A notch attached to the top edge of the screen, modelled on the Nusa
+// app: hover to open, pages for Music (real Windows media sessions via
+// scripts/gsm.ps1), Pomodoro, Water, Shelf, Todo and Calendar, a mascot
+// that appears when the PC is idle, a tray icon and a Settings window.
+//
+// Settings live here (single source of truth, shared by the notch, the
+// tray menu and the Settings window). Todos / shelf / water data are
+// managed by the renderer through the same JSON store file.
 
-const {app, BrowserWindow, ipcMain, dialog, shell, Notification, screen} = require('electron');
+const {app, BrowserWindow, Tray, Menu, ipcMain, shell, Notification, screen} = require('electron');
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 const {execFile} = require('child_process');
 
-const COLLAPSED = {width: 380, height: 56};
-const EXPANDED = {width: 760, height: 540};
-
-let win = null;
-let position = 'top'; // 'top' | 'right' | 'left' — read from the store at boot
-
-// ---------- tiny JSON store in userData ----------
+// ---------- store ----------
 function storeFile() {
     return path.join(app.getPath('userData'), 'isle-data.json');
 }
@@ -29,33 +24,66 @@ function readStore() {
         return {};
     }
 }
-function writeStore(data) {
+function writeKey(key, value) {
+    const data = readStore();
+    data[key] = value;
     try {
         fs.writeFileSync(storeFile(), JSON.stringify(data));
-    } catch { /* read-only profile: run unpersisted */ }
+    } catch { /* read-only profile */ }
 }
 
-// ---------- window placement ----------
-function boundsFor(expanded) {
-    const size = expanded ? EXPANDED : COLLAPSED;
-    const area = screen.getPrimaryDisplay().workArea;
-    let x, y;
-    if (position === 'right') {
-        x = area.x + area.width - size.width - 14;
-        y = area.y + Math.round((area.height - size.height) / 2);
-    } else if (position === 'left') {
-        x = area.x + 14;
-        y = area.y + Math.round((area.height - size.height) / 2);
-    } else {
-        x = area.x + Math.round((area.width - size.width) / 2);
-        y = area.y + 10;
-    }
-    return {x, y, width: size.width, height: size.height};
+// ---------- settings ----------
+const DEFAULT_SETTINGS = {
+    startWithWindows: false,
+    mascot: true,
+    minimal: false,
+    size: 'auto', // auto | 100 | 115 | 130 | 150
+    hideFullscreen: true,
+    sounds: true,
+    lyricsPill: true,
+    pages: {music: true, pomodoro: true, water: true, shelf: true, todo: true, calendar: true},
+    pomo: {focus: 25, short: 5, long: 15},
+    water: {goal: 1500, bottle: 250, remind: true},
+};
+let settings = {...DEFAULT_SETTINGS, ...(readStore().settings || {})};
+settings.pages = {...DEFAULT_SETTINGS.pages, ...settings.pages};
+settings.pomo = {...DEFAULT_SETTINGS.pomo, ...settings.pomo};
+settings.water = {...DEFAULT_SETTINGS.water, ...settings.water};
+
+function scaleFactor() {
+    if (settings.size !== 'auto') return parseInt(settings.size, 10) / 100;
+    return screen.getPrimaryDisplay().bounds.width >= 1920 ? 1.15 : 1.0;
 }
 
-function createWindow() {
-    win = new BrowserWindow({
-        ...boundsFor(false),
+// ---------- notch window ----------
+const BASE = {
+    line: {width: 360, height: 14},
+    pill: {width: 380, height: 56},
+    pillLyrics: {width: 380, height: 148},
+    card: {width: 700, height: 500},
+    cardLyrics: {width: 700, height: 596},
+};
+let notch = null;
+let settingsWin = null;
+let tray = null;
+let currentMode = 'pill';
+let hiddenByFullscreen = false;
+
+function boundsFor(mode) {
+    const s = scaleFactor();
+    const base = BASE[mode] || BASE.pill;
+    const width = Math.round(base.width * s);
+    const height = Math.round(base.height * s);
+    const b = screen.getPrimaryDisplay().bounds;
+    return {x: b.x + Math.round((b.width - width) / 2), y: b.y, width, height};
+}
+function applyMode() {
+    if (notch) notch.setBounds(boundsFor(currentMode));
+}
+
+function createNotch() {
+    notch = new BrowserWindow({
+        ...boundsFor(currentMode),
         transparent: true,
         frame: false,
         resizable: false,
@@ -69,120 +97,187 @@ function createWindow() {
             nodeIntegration: false,
         },
     });
-    win.setAlwaysOnTop(true, 'screen-saver');
-    win.loadFile(path.join(__dirname, 'src', 'index.html'));
-    win.once('ready-to-show', () => win.show());
+    notch.setAlwaysOnTop(true, 'screen-saver');
+    notch.loadFile(path.join(__dirname, 'src', 'index.html'));
+    notch.once('ready-to-show', () => notch.show());
 }
 
-// ---------- system info (CPU sampled between calls) ----------
-let lastCpu = null;
-function cpuPercent() {
-    const cpus = os.cpus();
-    let idle = 0, total = 0;
-    for (const c of cpus) {
-        idle += c.times.idle;
-        total += c.times.user + c.times.nice + c.times.sys + c.times.idle + c.times.irq;
+// ---------- settings window ----------
+function openSettings() {
+    if (settingsWin) {
+        settingsWin.focus();
+        return;
     }
-    if (!lastCpu) {
-        lastCpu = {idle, total};
-        return 0;
+    settingsWin = new BrowserWindow({
+        width: 780,
+        height: 560,
+        title: 'Isle Settings',
+        autoHideMenuBar: true,
+        backgroundColor: '#17171a',
+        webPreferences: {
+            preload: path.join(__dirname, 'preload.js'),
+            contextIsolation: true,
+            nodeIntegration: false,
+        },
+    });
+    settingsWin.loadFile(path.join(__dirname, 'src', 'settings.html'));
+    settingsWin.on('closed', () => { settingsWin = null; });
+}
+
+// ---------- tray ----------
+function buildTray() {
+    if (!tray) {
+        tray = new Tray(path.join(__dirname, 'assets', 'icon.png'));
+        tray.setToolTip('Isle');
+        tray.on('click', openSettings);
     }
-    const dIdle = idle - lastCpu.idle;
-    const dTotal = total - lastCpu.total;
-    lastCpu = {idle, total};
-    if (dTotal <= 0) return 0;
-    return Math.max(0, Math.min(100, Math.round((1 - dIdle / dTotal) * 100)));
+    const check = (key) => settings[key];
+    tray.setContextMenu(Menu.buildFromTemplate([
+        {label: 'Isle Settings…', click: openSettings},
+        {type: 'separator'},
+        {label: 'Start with Windows', type: 'checkbox', checked: check('startWithWindows'),
+            click: (item) => setSettings({startWithWindows: item.checked})},
+        {label: 'Mascot', type: 'checkbox', checked: check('mascot'),
+            click: (item) => setSettings({mascot: item.checked})},
+        {label: 'Minimal notch', type: 'checkbox', checked: check('minimal'),
+            click: (item) => setSettings({minimal: item.checked})},
+        {type: 'separator'},
+        {label: 'Exit Isle', click: () => app.quit()},
+    ]));
 }
 
-async function sysInfo() {
-    let disk = null;
-    try {
-        const s = await fs.promises.statfs('C:\\');
-        disk = {total: s.blocks * s.bsize, free: s.bfree * s.bsize};
-    } catch { /* no C: — leave null, the page hides the row */ }
-    return {
-        cpu: cpuPercent(),
-        cpuModel: os.cpus()[0]?.model ?? '',
-        cores: os.cpus().length,
-        memTotal: os.totalmem(),
-        memFree: os.freemem(),
-        uptime: os.uptime(),
-        disk,
-    };
+// ---------- settings plumbing ----------
+function applySettingsSideEffects() {
+    const exe = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;
+    app.setLoginItemSettings({openAtLogin: !!settings.startWithWindows, path: exe});
+    applyMode();
+    buildTray();
 }
-
-// ---------- wallpapers ----------
-function scanWallpapers() {
-    const roots = [
-        path.join(os.homedir(), 'Pictures'),
-        'C:\\Windows\\Web\\Wallpaper',
-        'C:\\Windows\\Web\\4K\\Wallpaper',
-    ];
-    const out = [];
-    const walk = (dir, depth) => {
-        if (depth > 2 || out.length >= 80) return;
-        let entries;
-        try {
-            entries = fs.readdirSync(dir, {withFileTypes: true});
-        } catch {
-            return;
+function setSettings(patch) {
+    settings = {...settings, ...patch};
+    if (patch.pages) settings.pages = {...DEFAULT_SETTINGS.pages, ...settings.pages};
+    if (patch.pomo) settings.pomo = {...DEFAULT_SETTINGS.pomo, ...settings.pomo};
+    if (patch.water) settings.water = {...DEFAULT_SETTINGS.water, ...settings.water};
+    writeKey('settings', settings);
+    applySettingsSideEffects();
+    for (const w of [notch, settingsWin]) {
+        if (w && !w.isDestroyed()) {
+            w.webContents.send('settings:changed', {...settings, scale: scaleFactor()});
         }
-        for (const e of entries) {
-            if (e.isDirectory()) walk(path.join(dir, e.name), depth + 1);
-            else if (/\.(jpe?g|png)$/i.test(e.name)) out.push(path.join(dir, e.name));
-            if (out.length >= 80) return;
-        }
-    };
-    for (const r of roots) walk(r, 0);
-    return out;
+    }
 }
 
-function applyWallpaper(file) {
-    const safe = file.replace(/'/g, "''");
-    const ps = "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; " +
-        'public class IsleW { [DllImport("user32.dll", SetLastError=true)] ' +
-        "public static extern bool SystemParametersInfo(int a, int b, string c, int d); }'; " +
-        `[IsleW]::SystemParametersInfo(20, 0, '${safe}', 3)`;
-    execFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], () => {});
+// ---------- PowerShell bridges (media sessions / volume / fullscreen) ----------
+function runPs(script, args) {
+    return new Promise((resolve) => {
+        execFile('powershell.exe',
+            ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(__dirname, 'scripts', script), ...args],
+            {timeout: 8000, maxBuffer: 8 * 1024 * 1024, windowsHide: true},
+            (err, stdout) => {
+                if (err && !stdout) return resolve(null);
+                try {
+                    resolve(JSON.parse(String(stdout).trim().split('\n').pop()));
+                } catch {
+                    resolve(null);
+                }
+            });
+    });
 }
+
+let musicInFlight = null;
+let musicCache = {key: null, art: '', artType: '', info: null};
+async function musicInfo() {
+    if (musicInFlight) return musicCache.info;
+    musicInFlight = (async () => {
+        const info = await runPs('gsm.ps1', ['-Mode', 'info']);
+        if (info && info.hasSession) {
+            const key = `${info.title}|${info.artist}`;
+            if (key !== musicCache.key) {
+                musicCache = {key, art: '', artType: '', info};
+                const withArt = await runPs('gsm.ps1', ['-Mode', 'info', '-Art', '1']);
+                if (withArt && withArt.art && `${withArt.title}|${withArt.artist}` === key) {
+                    musicCache.art = withArt.art;
+                    musicCache.artType = withArt.artType || '';
+                }
+            } else {
+                musicCache.info = info;
+            }
+            if (musicCache.info) {
+                musicCache.info.art = musicCache.art;
+                musicCache.info.artType = musicCache.artType;
+            }
+        } else {
+            musicCache = {key: null, art: '', artType: '', info: info || {hasSession: false}};
+        }
+        musicInFlight = null;
+        return musicCache.info;
+    })();
+    return musicInFlight;
+}
+
+// ---------- fullscreen watcher (games/videos: step aside) ----------
+setInterval(async () => {
+    if (!notch || notch.isDestroyed()) return;
+    if (!settings.hideFullscreen) {
+        if (hiddenByFullscreen) { notch.show(); hiddenByFullscreen = false; }
+        return;
+    }
+    const r = await runPs('win.ps1', ['-Mode', 'fg']);
+    if (!r || typeof r.fullscreen !== 'boolean') return;
+    if (r.fullscreen && !hiddenByFullscreen) {
+        notch.hide();
+        hiddenByFullscreen = true;
+    } else if (!r.fullscreen && hiddenByFullscreen) {
+        notch.show();
+        hiddenByFullscreen = false;
+    }
+}, 3000);
 
 // ---------- IPC ----------
 ipcMain.handle('store:get', () => readStore());
-ipcMain.handle('store:set', (_e, key, value) => {
-    const data = readStore();
-    data[key] = value;
-    writeStore(data);
-});
-ipcMain.handle('sys:info', () => sysInfo());
-ipcMain.handle('wp:list', () => scanWallpapers());
-ipcMain.handle('wp:apply', (_e, file) => applyWallpaper(file));
-ipcMain.handle('shelf:pick', async () => {
-    const r = await dialog.showOpenDialog(win, {
-        properties: ['openFile', 'multiSelections'],
-        title: 'Add files to the Shelf',
-    });
-    return r.canceled ? [] : r.filePaths;
+ipcMain.handle('store:set', (_e, key, value) => writeKey(key, value));
+ipcMain.handle('settings:get', () => ({...settings, scale: scaleFactor()}));
+ipcMain.handle('settings:set', (_e, patch) => setSettings(patch));
+ipcMain.handle('settings:open', () => openSettings());
+ipcMain.handle('music:info', () => musicInfo());
+ipcMain.handle('music:cmd', (_e, cmd, arg) =>
+    runPs('gsm.ps1', ['-Mode', 'cmd', '-Cmd', String(cmd), '-Arg', String(arg || 0)]));
+ipcMain.handle('vol:get', () => runPs('win.ps1', ['-Mode', 'volget']));
+ipcMain.handle('vol:set', (_e, v) => runPs('win.ps1', ['-Mode', 'volset', '-Arg', String(v)]));
+ipcMain.handle('fs:stat', (_e, p) => {
+    try {
+        const s = fs.statSync(p);
+        return {exists: true, size: s.size, isDir: s.isDirectory()};
+    } catch {
+        return {exists: false, size: 0, isDir: false};
+    }
 });
 ipcMain.handle('shell:open', (_e, p) => shell.openPath(p));
 ipcMain.handle('notify', (_e, title, body) => {
     if (Notification.isSupported()) new Notification({title, body}).show();
 });
-ipcMain.handle('win:expand', (_e, expanded) => {
-    if (win) win.setBounds(boundsFor(expanded), true);
-});
-ipcMain.handle('win:position', (_e, pos) => {
-    position = pos;
-    if (win) win.setBounds(boundsFor(false), true);
+ipcMain.handle('win:mode', (_e, mode) => {
+    if (BASE[mode]) {
+        currentMode = mode;
+        applyMode();
+    }
 });
 ipcMain.handle('app:quit', () => app.quit());
+ipcMain.on('dragstart', (event, files) => {
+    const list = (files || []).filter(f => typeof f === 'string' && fs.existsSync(f));
+    if (list.length) {
+        event.sender.startDrag({files: list, icon: path.join(__dirname, 'assets', 'icon.png')});
+    }
+});
 
 // ---------- boot ----------
 if (!app.requestSingleInstanceLock()) {
     app.quit();
 } else {
     app.whenReady().then(() => {
-        position = readStore().position || 'top';
-        createWindow();
+        createNotch();
+        applySettingsSideEffects();
     });
-    app.on('window-all-closed', () => app.quit());
+    // The app lives in the tray; open windows closing never quits it.
+    app.on('window-all-closed', () => {});
 }

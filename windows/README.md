@@ -1,36 +1,53 @@
 # Isle for Windows
 
-The Windows version of **Isle** — the living notch that lives in this repo
-as a GNOME Shell extension (see the `main` branch). Same pages, same look,
-same behaviour: a small pill that sits on your screen, opens on hover, and
-switches pages from the dots or the hover icon bar.
+The Windows version of **Isle** — modelled on the **Nusa** app
+([rama2555.github.io/nusa](https://rama2555.github.io/nusa/)): a small
+black notch hanging from the top edge of the screen that shows your
+music, synced lyrics, timers and files, then quietly gets out of the
+way. The GNOME Shell version lives on this repo's `main` branch; this
+`exe` branch holds the Windows app under `windows/`. It is an
+[Electron](https://www.electronjs.org/) app.
 
-This branch (`exe`) holds the Windows app under `windows/`. It is an
-[Electron](https://www.electronjs.org/) app, so the UI is the same
-HTML/CSS/JS style as the notch itself.
+## What it does (v0.2.0)
 
-## Pages in v0.1.0
+- **Hover to open, move away to close.** Page dots at the bottom, hover
+  them for the page icon bar, mouse wheel or arrow keys switch pages.
+- **Music from any player** — Spotify, Apple Music, Media Player,
+  YouTube in a browser — read from the real Windows media sessions
+  (via `scripts/gsm.ps1`), with album art, seek bar, transport controls
+  and a volume slider on the Music page.
+- **Synced lyrics** — the Lyrics button splits the notch in two: a
+  second pill shows each line as it's sung (from LRCLIB). Click a line
+  to jump there.
+- **Pomodoro** — Focus / Short / Long sessions (lengths in Settings);
+  the countdown shows in the closed notch, with a soft chime and a
+  notification at the end.
+- **Water** — Drink button with your bottle size, daily goal, an hourly
+  chart, and gentle once-an-hour reminders while you're behind.
+- **Shelf** — drag files onto the notch, drag them back out into any
+  app, click to open; text cards copy on click; Ctrl/Shift+click
+  selects several. Files are referenced, never copied.
+- **To-do with reminders** — give a task a time and the notch taps you
+  when it's due, with Snooze. Tasks can carry a colour and be edited
+  by double-clicking.
+- **Calendar** — simple month view.
+- **The mascot** — when the PC is quiet, the clock fades and a pair of
+  eyes appears; they doze off after a while and wave when you return.
+- **Popups** — plugging in the charger, losing Wi-Fi and friends show
+  briefly in the closed notch.
+- **Tray icon + Settings window** — Start with Windows, notch size,
+  Minimal notch (a thin black line), mascot, hide-in-full-screen,
+  page switches, Pomodoro durations and water goal, all applied
+  instantly.
 
-- **Power** — real battery level/state from the system, with the Isle ring
-- **Hardware** — live CPU, memory and C: disk usage
-- **Calendar** — month view
-- **Todo** — tasks, saved locally
-- **Focus** — 25/5/15 minute timer with a Windows notification at the end
-- **Water** — daily intake tracker (+250 ml), resets each day
-- **Shelf** — pin files, click to open
-- **Wallpaper** — thumbnails from your Pictures and the built-in Windows
-  wallpapers; click to apply
-- **Settings** (gear in the notch) — choose which pages show, notch
-  position (top centre / right / left), size, and Quit
-
-Music, Lyrics and AI Usage are not in this build yet: on Windows they need
-access to the system media sessions, which lands in a later version. No
-page shows fake data — what you see is read live from the machine.
+Not yet: volume/brightness/Caps-Lock key overlays. AI Usage
+(Antigravity) also stays a GNOME-side feature for now. No page shows
+fake data — everything is read live from the machine.
 
 ## Run it
 
-Download `Isle-0.1.0.exe` (portable — no install) and double-click it, or
-build it yourself:
+Download `Isle-0.2.0.exe` (portable — no install) and double-click it,
+or build it yourself:
 
 ```
 npm install
@@ -39,7 +56,3 @@ npm run dist       # build the portable exe into dist/
 ```
 
 Data is stored in `%APPDATA%/isle-windows/isle-data.json`.
-
-Position defaults to top centre (the classic Dynamic Island spot);
-Ram's GNOME build sits right-middle, and that position is one click away
-in Settings.

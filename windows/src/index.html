@@ -7,26 +7,28 @@
 </head>
 <body>
 <div id="notch">
-  <!-- collapsed pill -->
-  <div id="pill">
-    <span id="pillClock">--:--</span>
-    <span id="pillDate"></span>
-    <span id="pillBattery" class="chip" hidden></span>
-  </div>
+  <!-- minimal notch: just a thin line at the top edge -->
+  <div id="line" hidden></div>
+
+  <!-- collapsed pill: clock / mascot eyes / music / pomodoro / popups -->
+  <div id="pill"></div>
 
   <!-- expanded card -->
   <div id="card" hidden>
     <div id="head">
-      <span id="pageTitle">Power</span>
-      <span class="headBtns">
-        <button id="gearBtn" title="Settings">⚙</button>
-        <button id="closeBtn" title="Collapse">⌄</button>
-      </span>
+      <span id="pageTitle">Music</span>
+      <span id="headAction"></span>
     </div>
     <div id="pageBody"></div>
     <div id="iconbar"></div>
-    <div id="dots"></div>
+    <div id="pagebar">
+      <div id="dots"></div>
+      <button id="gearBtn" title="Settings">⚙</button>
+    </div>
   </div>
+
+  <!-- the lyrics split-pill: a second pill under the notch -->
+  <div id="lyricsPill" hidden></div>
 </div>
 <script src="app.js"></script>
 </body>
