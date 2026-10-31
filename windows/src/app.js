@@ -34,8 +34,10 @@ const fmtClock = (sec) => {
 const todayKey = () => new Date().toDateString();
 
 // ---------------- sizing: the notch hugs its content ----------------
-const PILL_SIZES = {line: [216, 12], clock: [216, 42], eyes: [150, 42],
-    popup: [330, 42], pomo: [264, 42], music: [344, 42]};
+const PILL_SIZES = {line: [192, 12], clock: [192, 40], eyes: [140, 40],
+    popup: [320, 40], pomo: [250, 40], music: [330, 40]};
+const BOLT_SVG = '<span class="bolt"><svg viewBox="0 0 24 24"><path d="M13.2 1.6 5 13.4h5.4L9 22.4l8.2-11.8h-5.4l1.4-9z"/></svg></span>';
+const LYR_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5c-1.4 0-2.8-.34-4-.97L3 20l1.03-5.5A8.5 8.5 0 1 1 21 11.5z"/><path d="M8.6 9.2v3M12.4 9.2v3"/></svg>';
 let lastSentSize = '';
 function sendSize(w, h) {
     const key = `${w}x${h}`;
@@ -49,7 +51,7 @@ function fit() {
         sendSize(s[0], s[1]);
         return;
     }
-    if (current === 'music') sendSize(...(music.lyricsOn ? [664, 208] : [544, 218]));
+    if (current === 'music') sendSize(...(music.lyricsOn ? [664, 208] : [544, 224]));
     else if (current === 'pomodoro') sendSize(544, 198);
     else if (current === 'water') sendSize(544, 198);
     else if (current === 'calendar') sendSize(544, 314);
@@ -211,7 +213,7 @@ function renderPill(force) {
         kind = 'clock';
         const d = new Date();
         sig = `c${d.getMinutes()}${battery && battery.charging ? 'chg' : ''}`;
-        html = `${battery && battery.charging ? '<span class="bolt">⚡</span>' : ''}
+        html = `${battery && battery.charging ? BOLT_SVG : ''}
                 <span class="clock">${d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})}</span>`;
     }
     pillKind = kind;
@@ -279,7 +281,20 @@ document.documentElement.addEventListener('mouseleave', () => {
     clearTimeout(openT);
     if (expanded) closeT = setTimeout(closeCard, 650);
 });
-$('#gearBtn').addEventListener('click', () => window.isle.openSettings());
+$('#bellBtn').addEventListener('click', () => {
+    if (expanded) showPage('todo'); else openCard('todo');
+});
+function updateBell() {
+    const now = new Date();
+    const mins = now.getHours() * 60 + now.getMinutes();
+    const hot = !!dueTask || data.todos.some(t => {
+        if (t.done || !t.time) return false;
+        const [h, m] = t.time.split(':').map(Number);
+        const dm = h * 60 + m;
+        return dm <= mins + 30 && dm >= mins - 120;
+    });
+    $('#bellDot').hidden = !hot;
+}
 function stepPage(dir) {
     const pages = visiblePages();
     let i = pages.findIndex(p => p.id === current);
@@ -327,7 +342,8 @@ function showPage(id) {
     current = id;
     const split = id === 'music' && music.lyricsOn;
     $('#strip').style.display = split ? 'none' : '';
-    $('#stripTitle').textContent = (PAGES.find(p => p.id === id) || {}).name || '';
+    // The original leaves the strip's left slot empty on the Music page.
+    $('#stripTitle').textContent = id === 'music' ? '' : ((PAGES.find(p => p.id === id) || {}).name || '');
     setStripAction([]);
     const body = $('#pageBody');
     body.innerHTML = '';
@@ -350,7 +366,7 @@ function musicControlsHtml(info) {
         <span class="tm" id="mDur">0:00</span>
       </div>
       <div class="mCtlRow">
-        <span class="side"><button id="mLyr" class="lyrBtn${music.lyricsOn ? ' active' : ''}" title="Lyrics">💬</button></span>
+        <span class="side"><button id="mLyr" class="lyrBtn${music.lyricsOn ? ' active' : ''}" title="Lyrics">${LYR_SVG}</button></span>
         <span class="sp">
           <button id="mPrev" title="Previous">⏮</button>
           <button id="mPlay" title="Play / pause">${info.playing ? '⏸' : '▶'}</button>
@@ -825,6 +841,7 @@ setInterval(() => {
         if (expanded && current === 'pomodoro' && pomo.draw) pomo.draw();
     }
     tickStrip();
+    updateBell();
     renderPill();
     checkReminders();
 }, 1000);

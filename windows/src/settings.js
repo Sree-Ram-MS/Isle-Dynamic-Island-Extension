@@ -145,7 +145,7 @@ const RENDERERS = {
     },
     about(m) {
         m.innerHTML = `<h1>About</h1>
-          <p class="note">Isle for Windows 0.3.0 — a living notch for the top of your screen, matched to the
+          <p class="note">Isle for Windows 0.3.1 — a living notch for the top of your screen, matched to the
           Nusa app. Part of the Isle project: the GNOME version lives on the main branch of this repository.
           Tasks, water logs, shelf items and settings are stored only on this PC, in your user folder.</p>`;
         const g = document.createElement('div');

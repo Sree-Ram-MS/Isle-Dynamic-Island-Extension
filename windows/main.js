@@ -53,7 +53,9 @@ settings.water = {...DEFAULT_SETTINGS.water, ...settings.water};
 
 function scaleFactor() {
     if (settings.size !== 'auto') return parseInt(settings.size, 10) / 100;
-    return screen.getPrimaryDisplay().bounds.width >= 1920 ? 1.15 : 1.0;
+    // Auto matches the original app on Ram's 1920px screen: 1.0 — an
+    // earlier 1.15 made every state ~15% larger than the reference.
+    return screen.getPrimaryDisplay().bounds.width >= 1600 ? 1.0 : 0.9;
 }
 
 // ---------- notch window ----------
@@ -63,7 +65,7 @@ function scaleFactor() {
 let notch = null;
 let settingsWin = null;
 let tray = null;
-let lastSize = {width: 216, height: 42};
+let lastSize = {width: 192, height: 40};
 let hiddenByFullscreen = false;
 
 function boundsFor(size) {
