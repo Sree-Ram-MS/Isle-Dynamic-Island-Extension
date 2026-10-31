@@ -22,9 +22,11 @@ use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SYSTEMTIME, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetTickCount64};
 use windows_sys::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{SetFocus, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE,
+};
 use windows_sys::Win32::UI::Shell::{
     DefSubclassProc, DragAcceptFiles, DragFinish, DragQueryFileW, SetWindowSubclass, ShellExecuteW,
     HDROP,
@@ -65,7 +67,6 @@ const A_PREV_TRACK: i32 = 12;
 const A_SEEK: i32 = 13;
 const A_LYRICS: i32 = 14;
 const A_LYRIC_LINE: i32 = 15;
-const A_VOL_TOGGLE: i32 = 16;
 const A_VOL_BAR: i32 = 17;
 const A_VOL_MUTE: i32 = 18;
 const A_POMO_PLAY: i32 = 20;
@@ -81,6 +82,15 @@ const A_TODO_TOGGLE: i32 = 52;
 const A_TODO_DELETE: i32 = 53;
 
 const PAGES: usize = 5; // 0 Music, 1 Pomodoro, 2 Water, 3 Shelf, 4 Todo
+
+// Real-pixel scale of the design (percent). Collapsed tab stays small; the
+// opened notch is drawn larger. Raise EXPANDED_SCALE for a bigger notch.
+const COLLAPSED_SCALE: i32 = 85;
+const EXPANDED_SCALE: i32 = 100;
+
+// Page icons shown in place of the bottom dots while hovering them.
+// Water has no suitable glyph, so it is drawn by hand (empty string).
+const PAGE_ICONS: [&str; PAGES] = ["\u{e8d6}", "\u{e916}", "", "\u{e8b5}", "\u{e8fd}"];
 
 struct ShelfItem {
     path: String,
@@ -103,9 +113,15 @@ struct App {
     pomo_label: String,
     // water
     reminders: bool,
-    vol_open: bool,
     vol_level: f32,
     vol_muted: bool,
+    vol_drag: bool,
+    // bottom page dots / icons
+    dots_hover: bool,
+    // mouse wheel / touchpad swipe between pages
+    wheel_acc: i32,
+    last_wheel_tick: u64,
+    last_page_tick: u64,
     // data
     store: Store,
     shelf_items: Vec<ShelfItem>,
@@ -297,23 +313,39 @@ fn collapsed_size() -> (i32, i32) {
 
 fn expanded_size() -> (i32, i32) {
     let a = app();
+    // Every page keeps ~14 units of free room at the bottom for the page
+    // dots, which turn into icons when hovered.
     if a.page == 0 && a.lyrics_open {
-        return (664, 208);
+        return (664, 224);
     }
     let h = match a.page {
-        0 => if a.vol_open { 260 } else { 218 },
-        1 => 198,
-        2 => 198,
+        0 => 232,
+        1 => 212,
+        2 => 212,
         3 => {
             if a.shelf_items.is_empty() {
-                196
+                210
             } else {
-                (150 + a.shelf_items.len() as i32 * 40).min(330)
+                (164 + a.shelf_items.len() as i32 * 40).min(344)
             }
         }
-        _ => 198,
+        _ => 212,
     };
     (544, h)
+}
+
+// Inline volume slider geometry (design units): sits on the controls row
+// between the next-track button and the speaker button.
+fn vol_bar_geom() -> (i32, i32) {
+    let w = expanded_size().0;
+    let bx = w / 2 + 100;
+    (bx, (w - 80) - bx)
+}
+
+// Hover zone of the bottom dots (small) / page icons (wider once shown).
+fn dots_zone(w: i32, h: i32, hover: bool) -> RECT {
+    let (zw, zh) = if hover { (170, 34) } else { (90, 26) };
+    RECT { left: (w - zw) / 2, top: h - zh, right: (w + zw) / 2, bottom: h }
 }
 
 fn cur_design() -> (i32, i32) {
@@ -328,7 +360,8 @@ fn cur_design() -> (i32, i32) {
 // is true device pixels, not Windows' blurry bitmap scaling).
 fn cur_size() -> (i32, i32) {
     let (w, h) = cur_design();
-    ((w * 85 + 50) / 100, (h * 85 + 50) / 100)
+    let s = if app().expanded { EXPANDED_SCALE } else { COLLAPSED_SCALE };
+    ((w * s + 50) / 100, (h * s + 50) / 100)
 }
 
 unsafe fn apply_region(hwnd: HWND, w: i32, h: i32) {
@@ -370,6 +403,10 @@ unsafe fn paint(hdc: HDC, w: i32, h: i32) {
         draw_text(hdc, if is_prev { "‹" } else { "›" }, cx - 13, h / 2 - 13, 26, 26, "Segoe UI", 17, 400, cr(201, 201, 209), DT_CENTER);
         add_action(cx - 14, h / 2 - 14, 28, 28, if is_prev { A_PREV_PAGE } else { A_NEXT_PAGE }, 0);
     }
+    if app().dots_hover {
+        paint_page_icons(hdc, w, h);
+        return;
+    }
     // dots
     let dot_w = 5 * 5 + 4 * 6 + 14; // 5 dots + gaps + elongated active
     let mut dx = (w - dot_w) / 2;
@@ -379,6 +416,43 @@ unsafe fn paint(hdc: HDC, w: i32, h: i32) {
         fill_round(hdc, dx, dy, dw, 5, 5, if i == app().page { WHITE } else { cr(67, 67, 75) });
         add_action(dx - 4, dy - 6, dw + 8, 17, A_DOT, i as i32);
         dx += dw + 6;
+    }
+}
+
+// Hovering the bottom dots swaps them for one icon per page.
+unsafe fn paint_page_icons(hdc: HDC, w: i32, h: i32) {
+    const SLOT: i32 = 30;
+    let x0 = (w - SLOT * PAGES as i32) / 2;
+    let cy = h - 17;
+    for i in 0..PAGES {
+        let x = x0 + i as i32 * SLOT;
+        let active = i == app().page;
+        if active {
+            fill_round(hdc, x + 2, cy - 11, SLOT - 4, 22, 22, cr(52, 52, 58));
+        }
+        let col = if active { WHITE } else { cr(135, 135, 145) };
+        if PAGE_ICONS[i].is_empty() {
+            // droplet: round belly + pointed top
+            let (dx, dy) = (x + SLOT / 2, cy + 1);
+            fill_circle(hdc, dx, dy + 2, 5, col);
+            let pts = [
+                POINT { x: dx, y: dy - 7 },
+                POINT { x: dx - 4, y: dy - 1 },
+                POINT { x: dx + 4, y: dy - 1 },
+            ];
+            let brush = CreateSolidBrush(col);
+            let pen = CreatePen(PS_NULL as i32, 0, 0);
+            let ob = SelectObject(hdc, brush as HGDIOBJ);
+            let op = SelectObject(hdc, pen as HGDIOBJ);
+            Polygon(hdc, pts.as_ptr(), pts.len() as i32);
+            SelectObject(hdc, ob);
+            SelectObject(hdc, op);
+            DeleteObject(brush as HGDIOBJ);
+            DeleteObject(pen as HGDIOBJ);
+        } else {
+            draw_text(hdc, PAGE_ICONS[i], x, cy - 11, SLOT, 22, "Segoe MDL2 Assets", 14, 400, col, DT_CENTER);
+        }
+        add_action(x, h - 31, SLOT, 29, A_DOT, i as i32);
     }
 }
 
@@ -470,22 +544,22 @@ unsafe fn paint_music(hdc: HDC, w: i32, h: i32) {
         add_action(cx - 19, 172, 38, 32, A_PLAYPAUSE, 0);
         add_action(cx + 44, 172, 38, 32, A_NEXT_TRACK, 0);
     }
-    draw_text(hdc, "\u{e767}", w - 68, 176, 30, 26, "Segoe MDL2 Assets", 17, 400, col, DT_CENTER);
+    // speaker button (click = mute) with the slider on the same row,
+    // between the next-track button and the speaker
+    let (lvl, muted) = (app().vol_level, app().vol_muted);
+    let silent = muted || lvl <= 0.0;
+    draw_text(hdc, if silent { "\u{e74f}" } else { "\u{e767}" }, w - 68, 176, 30, 26, "Segoe MDL2 Assets", 17, 400, col, DT_CENTER);
     if m.present {
-        add_action(w - 72, 172, 38, 32, A_VOL_TOGGLE, 0);
-    }
-    if app().vol_open {
-        let cx = w / 2;
-        let (lvl, muted) = (app().vol_level, app().vol_muted);
-        draw_text(hdc, if muted { "\u{e74f}" } else { "\u{e767}" }, cx - 116, 208, 26, 24, "Segoe MDL2 Assets", 14, 400, cr(215, 215, 222), DT_CENTER);
-        add_action(cx - 118, 206, 30, 28, A_VOL_MUTE, 0);
-        fill_round(hdc, cx - 76, 217, 152, 6, 6, cr(43, 43, 49));
-        if lvl > 0.0 && !muted {
-            fill_round(hdc, cx - 76, 217, (152.0 * lvl) as i32, 6, 6, WHITE);
+        add_action(w - 72, 172, 38, 32, A_VOL_MUTE, 0);
+        let (bx, bw) = vol_bar_geom();
+        let by = 186; // 6 tall, centred on the row (centre y = 189)
+        fill_round(hdc, bx, by, bw, 6, 6, cr(43, 43, 49));
+        let fw = if silent { 0 } else { (bw as f32 * lvl) as i32 };
+        if fw > 0 {
+            fill_round(hdc, bx, by, fw.max(6), 6, 6, cr(233, 233, 238));
         }
-        add_action(cx - 80, 206, 160, 28, A_VOL_BAR, 0);
-        let pct = format!("{}%", (lvl * 100.0).round() as i32);
-        draw_text(hdc, &pct, cx + 84, 208, 44, 24, "Segoe UI", 12, 400, DIM, DT_LEFT);
+        fill_circle(hdc, bx + fw.clamp(3, bw - 3), by + 3, 5, WHITE);
+        add_action(bx - 6, 172, bw + 12, 32, A_VOL_BAR, 0);
     }
 }
 
@@ -725,24 +799,39 @@ unsafe fn paint_todo(hdc: HDC, w: i32, h: i32) {
 }
 
 // ---------- actions ----------
+unsafe fn goto_page(hwnd: HWND, page: usize) {
+    let a = app();
+    a.page = page % PAGES;
+    a.lyrics_open = false;
+    // the inline todo editor belongs to the todo page only
+    if a.page != 4 && !a.edit_hwnd.is_null() && IsWindowVisible(a.edit_hwnd) != 0 {
+        ShowWindow(a.edit_hwnd, SW_HIDE);
+    }
+    apply_size(hwnd);
+}
+
+// Set the system volume from a click/drag x position on the inline slider.
+fn vol_set_from_x(x: i32) {
+    let a = app();
+    let (bx, bw) = vol_bar_geom();
+    let frac = ((x - bx) as f64 / bw.max(1) as f64).clamp(0.0, 1.0) as f32;
+    let changed = (frac * 100.0).round() as i32 != (a.vol_level * 100.0).round() as i32;
+    if changed || a.vol_muted {
+        media::volume_set(frac);
+        a.vol_level = frac;
+        if a.vol_muted {
+            media::volume_toggle_mute();
+            a.vol_muted = false;
+        }
+    }
+}
+
 unsafe fn do_action(code: i32, param: i32, x: i32, _y: i32, hwnd: HWND) {
     let a = app();
     match code {
-        A_PREV_PAGE => {
-            a.page = (a.page + PAGES - 1) % PAGES;
-            a.lyrics_open = false;
-            apply_size(hwnd);
-        }
-        A_NEXT_PAGE => {
-            a.page = (a.page + 1) % PAGES;
-            a.lyrics_open = false;
-            apply_size(hwnd);
-        }
-        A_DOT => {
-            a.page = param as usize;
-            a.lyrics_open = false;
-            apply_size(hwnd);
-        }
+        A_PREV_PAGE => goto_page(hwnd, (a.page + PAGES - 1) % PAGES),
+        A_NEXT_PAGE => goto_page(hwnd, (a.page + 1) % PAGES),
+        A_DOT => goto_page(hwnd, param as usize),
         A_PLAYPAUSE => media::play_pause(media::snapshot().playing),
         A_NEXT_TRACK => media::next_track(),
         A_PREV_TRACK => media::prev_track(),
@@ -767,14 +856,6 @@ unsafe fn do_action(code: i32, param: i32, x: i32, _y: i32, hwnd: HWND) {
             }
             apply_size(hwnd);
         }
-        A_VOL_TOGGLE => {
-            a.vol_open = !a.vol_open;
-            if let Some((lvl, muted)) = media::volume_get() {
-                a.vol_level = lvl;
-                a.vol_muted = muted;
-            }
-            apply_size(hwnd);
-        }
         A_VOL_MUTE => {
             media::volume_toggle_mute();
             if let Some((lvl, muted)) = media::volume_get() {
@@ -782,16 +863,7 @@ unsafe fn do_action(code: i32, param: i32, x: i32, _y: i32, hwnd: HWND) {
                 a.vol_muted = muted;
             }
         }
-        A_VOL_BAR => {
-            let cx = expanded_size().0 / 2;
-            let frac = ((x - (cx - 76)) as f64 / 152.0).clamp(0.0, 1.0) as f32;
-            media::volume_set(frac);
-            a.vol_level = frac;
-            if a.vol_muted {
-                media::volume_toggle_mute();
-                a.vol_muted = false;
-            }
-        }
+        A_VOL_BAR => vol_set_from_x(x),
         A_LYRIC_LINE => media::seek(param as f64 / 10.0),
         A_POMO_PLAY => {
             a.pomo_running = !a.pomo_running;
@@ -902,6 +974,36 @@ unsafe extern "system" fn edit_subclass(hwnd: HWND, msg: u32, wparam: WPARAM, lp
     DefSubclassProc(hwnd, msg, wparam, lparam)
 }
 
+// ---------- pointer helpers ----------
+// Client pixel position -> design units.
+unsafe fn client_to_design(hwnd: HWND, px: i32, py: i32) -> (i32, i32) {
+    let mut crc: RECT = std::mem::zeroed();
+    GetClientRect(hwnd, &mut crc);
+    let (dw, dh) = cur_design();
+    (px * dw / crc.right.max(1), py * dh / crc.bottom.max(1))
+}
+
+unsafe fn lparam_to_design(hwnd: HWND, lparam: LPARAM) -> (i32, i32) {
+    client_to_design(
+        hwnd,
+        (lparam & 0xFFFF) as i16 as i32,
+        ((lparam >> 16) & 0xFFFF) as i16 as i32,
+    )
+}
+
+// Shrink back to the idle tab (used on mouse leave and after a drag that
+// ended outside the window).
+unsafe fn collapse(hwnd: HWND) {
+    let a = app();
+    let edit_visible = !a.edit_hwnd.is_null() && IsWindowVisible(a.edit_hwnd) != 0;
+    if a.expanded && !edit_visible && !a.vol_drag {
+        a.expanded = false;
+        a.lyrics_open = false;
+        a.dots_hover = false;
+        apply_size(hwnd);
+    }
+}
+
 // ---------- window proc ----------
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
@@ -988,17 +1090,50 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if !a.expanded {
                 a.expanded = true;
                 apply_size(hwnd);
+                return 0;
+            }
+            let (x, y) = lparam_to_design(hwnd, lparam);
+            // dragging the volume slider
+            if a.vol_drag && (wparam & 0x0001) != 0 {
+                vol_set_from_x(x);
+                InvalidateRect(hwnd, null(), 0);
+                return 0;
+            }
+            // bottom dots <-> page icons on hover
+            let (dw, dh) = cur_design();
+            let z = dots_zone(dw, dh, a.dots_hover);
+            let over = x >= z.left && x < z.right && y >= z.top && y < z.bottom;
+            if over != a.dots_hover {
+                a.dots_hover = over;
+                InvalidateRect(hwnd, null(), 0);
             }
             0
         }
         WM_MOUSELEAVE_MSG => {
             let a = app();
             a.tracking = false;
-            let edit_visible = !a.edit_hwnd.is_null() && IsWindowVisible(a.edit_hwnd) != 0;
-            if a.expanded && !edit_visible {
-                a.expanded = false;
-                a.lyrics_open = false;
-                apply_size(hwnd);
+            if a.dots_hover {
+                a.dots_hover = false;
+                InvalidateRect(hwnd, null(), 0);
+            }
+            // while dragging with the mouse captured, collapse happens on release
+            collapse(hwnd);
+            0
+        }
+        WM_LBUTTONDOWN => {
+            let a = app();
+            let (x, y) = lparam_to_design(hwnd, lparam);
+            let mut hit: Option<i32> = None;
+            for (r, code, _) in &a.actions {
+                if x >= r.left && x < r.right && y >= r.top && y < r.bottom {
+                    hit = Some(*code);
+                }
+            }
+            if hit == Some(A_VOL_BAR) {
+                a.vol_drag = true;
+                SetCapture(hwnd);
+                vol_set_from_x(x);
+                InvalidateRect(hwnd, null(), 0);
             }
             0
         }
@@ -1007,11 +1142,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             1
         }
         WM_LBUTTONUP => {
-            let mut crc: RECT = std::mem::zeroed();
-            GetClientRect(hwnd, &mut crc);
-            let (dw, dh) = cur_design();
-            let x = (lparam & 0xFFFF) as i16 as i32 * dw / crc.right.max(1);
-            let y = ((lparam >> 16) & 0xFFFF) as i16 as i32 * dh / crc.bottom.max(1);
+            if app().vol_drag {
+                app().vol_drag = false;
+                ReleaseCapture();
+                // released outside the notch: close it now
+                let mut p = POINT { x: 0, y: 0 };
+                GetCursorPos(&mut p);
+                let mut wr: RECT = std::mem::zeroed();
+                GetWindowRect(hwnd, &mut wr);
+                if !(p.x >= wr.left && p.x < wr.right && p.y >= wr.top && p.y < wr.bottom) {
+                    collapse(hwnd);
+                }
+                InvalidateRect(hwnd, null(), 0);
+                return 0;
+            }
+            let (x, y) = lparam_to_design(hwnd, lparam);
             // last matching action wins (delete zones were added after toggles)
             let mut hit: Option<(i32, i32)> = None;
             for (r, code, param) in &app().actions {
@@ -1047,19 +1192,55 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             apply_size(hwnd);
             0
         }
-        WM_MOUSEWHEEL => {
+        // Mouse wheel (vertical) and touchpad swipe (horizontal) flip pages.
+        // Wheel down / swipe left = next page. Precision touchpads send many
+        // small deltas, so they are summed up to one wheel notch (120), with
+        // a short cooldown so one swipe's momentum only flips one page.
+        // Over the volume slider the wheel changes the volume instead.
+        WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
             let a = app();
-            if a.expanded && a.page == 0 && media::snapshot().present {
-                let delta = ((wparam >> 16) & 0xFFFF) as i16 as f32 / 120.0;
-                if let Some((lvl, muted)) = media::volume_get() {
-                    let next = (lvl + delta * 0.05).clamp(0.0, 1.0);
-                    media::volume_set(next);
-                    a.vol_level = next;
-                    a.vol_muted = muted;
-                    if !a.vol_open {
-                        a.vol_open = true;
-                        apply_size(hwnd);
+            if !a.expanded {
+                return 0;
+            }
+            let delta = ((wparam >> 16) & 0xFFFF) as i16 as i32;
+            let mut p = POINT {
+                x: (lparam & 0xFFFF) as i16 as i32,
+                y: ((lparam >> 16) & 0xFFFF) as i16 as i32,
+            };
+            ScreenToClient(hwnd, &mut p);
+            let (x, y) = client_to_design(hwnd, p.x, p.y);
+            if msg == WM_MOUSEWHEEL && a.page == 0 && !a.lyrics_open && media::snapshot().present {
+                let (bx, bw) = vol_bar_geom();
+                if y >= 168 && y < 208 && x >= bx - 16 && x < bx + bw + 16 {
+                    if let Some((lvl, _)) = media::volume_get() {
+                        let next = (lvl + delta as f32 / 120.0 * 0.05).clamp(0.0, 1.0);
+                        media::volume_set(next);
+                        a.vol_level = next;
+                        if a.vol_muted {
+                            media::volume_toggle_mute();
+                            a.vol_muted = false;
+                        }
+                        InvalidateRect(hwnd, null(), 0);
                     }
+                    return 0;
+                }
+            }
+            let step = if msg == WM_MOUSEWHEEL { -delta } else { delta };
+            if step == 0 {
+                return 0;
+            }
+            let now = GetTickCount64();
+            if now.saturating_sub(a.last_wheel_tick) > 300 || (step > 0) != (a.wheel_acc > 0) {
+                a.wheel_acc = 0; // new gesture or direction change
+            }
+            a.last_wheel_tick = now;
+            a.wheel_acc += step;
+            if a.wheel_acc.abs() >= 120 {
+                let dir = a.wheel_acc.signum();
+                a.wheel_acc = 0;
+                if now.saturating_sub(a.last_page_tick) >= 350 {
+                    a.last_page_tick = now;
+                    goto_page(hwnd, (a.page as i32 + dir).rem_euclid(PAGES as i32) as usize);
                     InvalidateRect(hwnd, null(), 0);
                 }
             }
@@ -1090,7 +1271,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 a.store.water_ml = 0;
                 store::save(&a.store);
             }
-            if a.page == 0 {
+            if a.page == 0 && !a.vol_drag {
                 if let Some((lvl, muted)) = media::volume_get() {
                     a.vol_level = lvl;
                     a.vol_muted = muted;
@@ -1144,9 +1325,13 @@ fn main() {
             pomo_running: false,
             pomo_label: "Focus time".into(),
             reminders: false,
-            vol_open: false,
             vol_level: 0.0,
             vol_muted: false,
+            vol_drag: false,
+            dots_hover: false,
+            wheel_acc: 0,
+            last_wheel_tick: 0,
+            last_page_tick: 0,
             store: st,
             shelf_items,
             editing: false,

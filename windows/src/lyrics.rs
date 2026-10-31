@@ -3,6 +3,7 @@
 // with the closest-duration synced result winning. Runs on a short-lived
 // thread per track; results land in a shared snapshot the UI reads.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 #[derive(Clone, PartialEq)]
@@ -51,6 +52,9 @@ fn http_get(host: &str, path: &str) -> Option<String> {
         if session.is_null() {
             return None;
         }
+        // resolve / connect / send / receive timeouts so a dead network
+        // can't leave the fetch thread hanging forever
+        WinHttpSetTimeouts(session, 5000, 5000, 8000, 8000);
         let conn = WinHttpConnect(session, wide(host).as_ptr(), 443, 0);
         if conn.is_null() {
             WinHttpCloseHandle(session);
@@ -152,6 +156,10 @@ fn parse_lrc(text: &str) -> Vec<(f64, String)> {
                     }
                 }
             }
+        }
+        // skip metadata tags like [ar:Artist] / [length:03:20]
+        if line.starts_with('[') {
+            continue;
         }
         if !line.trim().is_empty() {
             lines.push((0.0, line.trim().to_string()));
@@ -289,10 +297,37 @@ fn find_synced(body: &str, duration_secs: f64) -> Option<Vec<(f64, String)>> {
     best.map(|(_, s)| parse_lrc(&s)).filter(|v| !v.is_empty())
 }
 
+// When every request failed at the network level (offline, DNS, TLS), wait
+// this long before the once-a-second UI timer is allowed to try again.
+const RETRY_AFTER_FAIL_MS: u64 = 15_000;
+static LAST_NET_FAIL_MS: AtomicU64 = AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+// An empty artist_name= filters LRCLIB down to nothing, so leave the
+// parameter out entirely when there is no artist.
+fn search_path(track: &str, artist: &str) -> String {
+    if artist.is_empty() {
+        format!("/api/search?track_name={}", url_encode(track))
+    } else {
+        format!(
+            "/api/search?track_name={}&artist_name={}",
+            url_encode(track),
+            url_encode(artist)
+        )
+    }
+}
+
 pub fn refetch(title: &str, artist: &str, duration_secs: f64) {
     if let Ok(mut k) = LYRICS_FOR.lock() {
         k.clear();
     }
+    LAST_NET_FAIL_MS.store(0, Ordering::Relaxed);
     ensure_fetched(title, artist, duration_secs);
 }
 
@@ -303,8 +338,12 @@ pub fn ensure_fetched(title: &str, artist: &str, duration_secs: f64) {
         if cur == key {
             return; // already loading/loaded for this track
         }
+        let failed_at = LAST_NET_FAIL_MS.load(Ordering::Relaxed);
+        if failed_at != 0 && now_ms().saturating_sub(failed_at) < RETRY_AFTER_FAIL_MS {
+            return; // recent network failure: don't hammer, retry shortly
+        }
         if let Ok(mut k) = LYRICS_FOR.lock() {
-            *k = key;
+            *k = key.clone();
         }
         if let Ok(mut l) = LYRICS.lock() {
             *l = LyricsState::Loading;
@@ -312,18 +351,37 @@ pub fn ensure_fetched(title: &str, artist: &str, duration_secs: f64) {
     }
     let candidates = title_candidates(title, artist);
     std::thread::spawn(move || {
+        // structured searches first, then one free-text search as a net
+        let mut paths: Vec<String> = candidates.iter().map(|(t, a)| search_path(t, a)).collect();
+        let (t0, a0) = candidates.first().cloned().unwrap_or_default();
+        let q = format!("{} {}", t0, a0).trim().to_string();
+        if !q.is_empty() {
+            paths.push(format!("/api/search?q={}", url_encode(&q)));
+        }
+
         let mut found: Option<Vec<(f64, String)>> = None;
-        for (t, a) in &candidates {
-            let path = format!(
-                "/api/search?track_name={}&artist_name={}",
-                url_encode(t),
-                url_encode(a)
-            );
-            if let Some(body) = http_get("lrclib.net", &path) {
+        let mut got_response = false;
+        for path in &paths {
+            if let Some(body) = http_get("lrclib.net", path) {
+                got_response = true;
                 if let Some(lines) = find_synced(&body, duration_secs) {
                     found = Some(lines);
                     break;
                 }
+            }
+        }
+
+        // the track may have changed while we were fetching: don't let a
+        // stale answer overwrite the newer track's state
+        let still_current = LYRICS_FOR.lock().map(|k| *k == key).unwrap_or(false);
+        if !still_current {
+            return;
+        }
+        if found.is_none() && !got_response {
+            // network failure, not "no lyrics exist": allow a retry soon
+            LAST_NET_FAIL_MS.store(now_ms(), Ordering::Relaxed);
+            if let Ok(mut k) = LYRICS_FOR.lock() {
+                k.clear();
             }
         }
         if let Ok(mut l) = LYRICS.lock() {
