@@ -23,6 +23,12 @@ pub struct Store {
     pub sounds: bool,
     /// Hide the notch while a full-screen app (game, video, slides) runs.
     pub hide_fs: bool,
+    /// Minimized notch turns into a mini player (art + wave) while music plays.
+    pub mini_player: bool,
+    /// The mini player shows the current lyric line instead of the title.
+    pub mini_lyrics: bool,
+    /// Water reminders on/off.
+    pub reminders: bool,
 }
 
 fn data_path() -> PathBuf {
@@ -37,6 +43,8 @@ pub fn load() -> Store {
     st.scale = 100;
     st.sounds = true;
     st.hide_fs = true;
+    st.mini_player = true;
+    st.mini_lyrics = true;
     let path = data_path();
     if let Ok(text) = std::fs::read_to_string(&path) {
         for line in text.lines() {
@@ -50,6 +58,9 @@ pub fn load() -> Store {
                     }
                     "sounds" => st.sounds = v != "0",
                     "hide_fs" => st.hide_fs = v != "0",
+                    "mini_player" => st.mini_player = v != "0",
+                    "mini_lyrics" => st.mini_lyrics = v != "0",
+                    "reminders" => st.reminders = v != "0",
                     "todo" => {
                         let (t, d) = v.rsplit_once('|').unwrap_or((v, "0"));
                         st.tasks.push(Task { title: t.to_string(), done: d == "1" });
@@ -78,6 +89,9 @@ pub fn save(st: &Store) {
     out.push_str(&format!("scale={}\n", st.scale));
     out.push_str(&format!("sounds={}\n", if st.sounds { 1 } else { 0 }));
     out.push_str(&format!("hide_fs={}\n", if st.hide_fs { 1 } else { 0 }));
+    out.push_str(&format!("mini_player={}\n", if st.mini_player { 1 } else { 0 }));
+    out.push_str(&format!("mini_lyrics={}\n", if st.mini_lyrics { 1 } else { 0 }));
+    out.push_str(&format!("reminders={}\n", if st.reminders { 1 } else { 0 }));
     for t in &st.tasks {
         out.push_str(&format!("todo={}|{}\n", t.title.replace(['\n', '\r', '|'], " "), if t.done { 1 } else { 0 }));
     }

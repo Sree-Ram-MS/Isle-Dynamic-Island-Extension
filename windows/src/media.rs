@@ -15,6 +15,10 @@ pub struct MediaInfo {
     pub album: String,
     pub position_secs: f64,
     pub duration_secs: f64,
+    /// When the player last updated `position_secs` (timeline LastUpdatedTime,
+    /// 100 ns FILETIME ticks, UTC). 0 = unknown. Lets the UI run the position
+    /// forward between the 2 s polls so lyrics stay in sync.
+    pub updated_ft: i64,
 }
 
 pub static MEDIA: Mutex<MediaInfo> = Mutex::new(MediaInfo {
@@ -25,10 +29,34 @@ pub static MEDIA: Mutex<MediaInfo> = Mutex::new(MediaInfo {
     album: String::new(),
     position_secs: 0.0,
     duration_secs: 0.0,
+    updated_ft: 0,
 });
 
 pub fn snapshot() -> MediaInfo {
     MEDIA.lock().map(|m| m.clone()).unwrap_or_default()
+}
+
+/// Playback position right now: the last polled position plus the time
+/// since the player reported it (while playing), capped at the duration.
+pub fn live_position(m: &MediaInfo) -> f64 {
+    if !m.playing || m.updated_ft <= 0 {
+        return m.position_secs;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+        + 11_644_473_600.0; // 1601 -> 1970
+    let elapsed = now - m.updated_ft as f64 / 10_000_000.0;
+    if !(0.0..=6.0 * 3600.0).contains(&elapsed) {
+        return m.position_secs;
+    }
+    let p = m.position_secs + elapsed;
+    if m.duration_secs > 0.0 {
+        p.min(m.duration_secs)
+    } else {
+        p
+    }
 }
 
 // ---------- album art ----------
@@ -149,6 +177,7 @@ fn fetch_once() -> Option<MediaInfo> {
     let pos = timeline.Position().ok()?.Duration as f64 / 10_000_000.0;
     let end = timeline.EndTime().ok()?.Duration as f64 / 10_000_000.0;
     let start = timeline.StartTime().ok()?.Duration as f64 / 10_000_000.0;
+    let updated = timeline.LastUpdatedTime().map(|d| d.UniversalTime).unwrap_or(0);
     Some(MediaInfo {
         present: true,
         playing: status == Status::Playing,
@@ -157,6 +186,7 @@ fn fetch_once() -> Option<MediaInfo> {
         album: props.AlbumTitle().map(|s| s.to_string()).unwrap_or_default(),
         position_secs: pos,
         duration_secs: (end - start).max(0.0),
+        updated_ft: updated,
     })
 }
 
