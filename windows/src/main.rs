@@ -1,4 +1,4 @@
-// Isle for Windows — native Rust v0.4.0
+// Isle for Windows — native Rust v0.5.0
 // The full app on the spike's skeleton: one top-edge window, one UI thread,
 // GDI drawing (double-buffered), real functionality per page:
 //   Music    — WinRT GSMTC (media.rs) + LRCLIB synced lyrics split-pane
@@ -10,6 +10,9 @@
 // v0.3.0: settings moved to their own window (sidebar + sections), the
 // Lyrics page shows only lyrics, the minimized notch becomes a mini player
 // with the live lyric line, and every size change of the notch animates.
+// v0.5.0: the notch follows the "Nusa Notch" design — a floating pill with
+// clock + battery ring (or the live lyric line), opening into a rounded card
+// with six pages: Music, Lyrics, Focus timer, Water, Shelf, To-do.
 
 #![windows_subsystem = "windows"]
 
@@ -26,6 +29,7 @@ use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SYSTEMT
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetTickCount64};
 use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
@@ -61,7 +65,7 @@ const GREEN: u32 = cr(52, 199, 89);
 const RED: u32 = cr(255, 59, 48);
 const BLUE: u32 = cr(10, 132, 255);
 const CYAN: u32 = cr(50, 173, 230);
-const BLACK: u32 = cr(6, 6, 7);
+const BLACK: u32 = cr(0, 0, 0);
 
 const TIMER_ID: usize = 1;
 const TIMER_ANIM: usize = 2; // ~60 fps while the notch is resizing
@@ -144,21 +148,14 @@ const SECTIONS: [(&str, &str, u32); 9] = [
     ("About", "\u{e946}", cr(99, 99, 102)),
 ];
 
-const PAGES: usize = 5; // 0 Music, 1 Pomodoro, 2 Water, 3 Shelf, 4 Todo
+const PAGES: usize = 6; // 0 Music, 1 Lyrics, 2 Focus timer, 3 Water, 4 Shelf, 5 To-do
 
-// Real-pixel scale of the design (percent). The idle tab stays small; the
-// opened notch uses the Settings > Notch size choice (see expanded_scale()).
-const COLLAPSED_SCALE: i32 = 85;
 
 // The opened notch has the same height on every page.
 const EXPANDED_H: i32 = 232;
 
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const RUN_VALUE: &str = "Isle";
-
-// Page icons shown in place of the bottom dots while hovering them.
-// Water has no suitable glyph, so it is drawn by hand (empty string).
-const PAGE_ICONS: [&str; PAGES] = ["\u{e8d6}", "\u{e916}", "", "\u{e8b5}", "\u{e8fd}"];
 
 struct ShelfItem {
     path: String,
@@ -170,7 +167,14 @@ struct App {
     hwnd: HWND,
     expanded: bool,
     page: usize,
-    lyrics_open: bool,
+    // pointer over this action (code, param): hover looks in the notch
+    hover: (i32, i32),
+    seek_bar: (i32, i32),
+    // design -> device pixel scale of the paint in progress (for clipping)
+    paint_k: (f32, f32),
+    // "Charging" popup in the minimized notch
+    alert_until: u64,
+    last_ac: i8,
     autostart: bool,
     // separate settings window
     settings_hwnd: HWND,
@@ -234,23 +238,6 @@ fn today_string() -> String {
         let mut t: SYSTEMTIME = std::mem::zeroed();
         GetLocalTime(&mut t);
         format!("{:04}-{:02}-{:02}", t.wYear, t.wMonth, t.wDay)
-    }
-}
-
-fn clock_strings() -> (String, String) {
-    unsafe {
-        let mut t: SYSTEMTIME = std::mem::zeroed();
-        GetLocalTime(&mut t);
-        let days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-        let mons = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-        let date = format!(
-            "{} {} {} {}",
-            days[t.wDayOfWeek as usize], t.wDay, mons[(t.wMonth - 1) as usize], t.wYear
-        );
-        let ap = if t.wHour >= 12 { "PM" } else { "AM" };
-        let h = if t.wHour % 12 == 0 { 12 } else { t.wHour % 12 };
-        let time = format!("{}:{:02} {}", h, t.wMinute, ap);
-        (date, time)
     }
 }
 
@@ -355,29 +342,6 @@ unsafe fn fill_circle(hdc: HDC, cx: i32, cy: i32, r: i32, color: u32) {
     DeleteObject(pen as HGDIOBJ);
 }
 
-unsafe fn draw_bolt(hdc: HDC, cx: i32, cy: i32, r: i32) {
-    fill_circle(hdc, cx, cy, r, GREEN);
-    // bolt as a small polygon, centred
-    let s = r as f64 / 10.0;
-    let pts = [
-        POINT { x: cx + (1.5 * s) as i32, y: cy - (7.0 * s) as i32 },
-        POINT { x: cx - (4.0 * s) as i32, y: cy + (1.0 * s) as i32 },
-        POINT { x: cx - (0.5 * s) as i32, y: cy + (1.0 * s) as i32 },
-        POINT { x: cx - (1.5 * s) as i32, y: cy + (7.0 * s) as i32 },
-        POINT { x: cx + (4.0 * s) as i32, y: cy - (1.0 * s) as i32 },
-        POINT { x: cx + (0.5 * s) as i32, y: cy - (1.0 * s) as i32 },
-    ];
-    let brush = CreateSolidBrush(WHITE);
-    let pen = CreatePen(PS_NULL as i32, 0, 0);
-    let ob = SelectObject(hdc, brush as HGDIOBJ);
-    let op = SelectObject(hdc, pen as HGDIOBJ);
-    Polygon(hdc, pts.as_ptr(), pts.len() as i32);
-    SelectObject(hdc, ob);
-    SelectObject(hdc, op);
-    DeleteObject(brush as HGDIOBJ);
-    DeleteObject(pen as HGDIOBJ);
-}
-
 unsafe fn draw_arc(hdc: HDC, cx: i32, cy: i32, r: i32, from_deg: f64, sweep_deg: f64, width: i32, color: u32) {
     if sweep_deg <= 0.0 {
         return;
@@ -406,36 +370,23 @@ fn add_action(x: i32, y: i32, w: i32, h: i32, code: i32, param: i32) {
 }
 
 // ---------- sizing ----------
-// Minimized notch: a mini player pill while music plays (when enabled),
-// otherwise just the tiny tab.
-fn mini_active() -> bool {
-    if !app().store.mini_player {
-        return false;
-    }
-    let m = media::snapshot();
-    m.present && m.playing
-}
-
 fn collapsed_size() -> (i32, i32) {
-    // Design units. Idle is just a tiny tab at the top edge; hovering it
-    // opens the notch (Ram, 2026-11-01). While music plays it is a wider
-    // pill: album art, the live lyric line and a sound wave.
-    if mini_active() {
-        (340, 34)
-    } else if app().store.minimal {
-        (120, 16)
-    } else {
-        (190, 26) // a small pill with the time
+    // Design units (Nusa Notch design): a floating pill.
+    match mini_mode() {
+        Mini::Alert => (330, 62),
+        Mini::Tab => (120, 16),
+        Mini::Lyric => (360, 34),
+        Mini::Wide => (240, 34),
+        Mini::Clock => (176, 34),
     }
 }
 
 fn expanded_size() -> (i32, i32) {
-    // Fixed size on every page, Lyrics included.
-    (544, EXPANDED_H)
+    (560, EXPANDED_H)
 }
 
-// Size of the opened notch in percent: the Settings choice, or for Auto
-// the Windows display scaling (clamped to the offered range).
+// Size of the notch in percent: the Settings choice, or for Auto the
+// Windows display scaling (clamped to the offered range).
 fn expanded_scale() -> i32 {
     match app().store.scale {
         0 => unsafe { (GetDpiForSystem() as i32 * 100 / 96).clamp(100, 150) },
@@ -443,18 +394,18 @@ fn expanded_scale() -> i32 {
     }
 }
 
-// Inline volume slider geometry (design units): sits on the controls row
-// between the next-track button and the speaker button.
+// Volume slider (design units), left of the speaker button on the controls
+// row; it only shows while the pointer is on the speaker or the slider.
 fn vol_bar_geom() -> (i32, i32) {
     let w = expanded_size().0;
-    let bx = w / 2 + 100;
-    (bx, (w - 80) - bx)
+    let right = w - 48 - 28 - 6;
+    (right - 70, 70)
 }
 
-// Hover zone of the bottom dots (small) / page icons (wider once shown).
+// Hover zone of the bottom dots (small) / page icon pills (wider once shown).
 fn dots_zone(w: i32, h: i32, hover: bool) -> RECT {
-    let (zw, zh) = if hover { (170, 34) } else { (90, 26) };
-    RECT { left: (w - zw) / 2, top: h - zh, right: (w + zw) / 2, bottom: h }
+    let (zw, zh) = if hover { (280, 34) } else { (130, 26) };
+    RECT { left: (w - zw) / 2, top: h - 8 - zh, right: (w + zw) / 2, bottom: h - 2 }
 }
 
 fn cur_design() -> (i32, i32) {
@@ -475,24 +426,29 @@ fn cur_size() -> (i32, i32) {
     if app().expanded {
         px_of(expanded_size(), expanded_scale())
     } else {
-        px_of(collapsed_size(), COLLAPSED_SCALE)
+        px_of(collapsed_size(), expanded_scale())
     }
 }
 
 // Corner radius (px) of the minimized look for the current state.
 fn collapsed_radius() -> i32 {
-    let (_, h) = px_of(collapsed_size(), COLLAPSED_SCALE);
-    if mini_active() || !app().store.minimal { h } else { 16 }
+    let (_, h) = px_of(collapsed_size(), expanded_scale());
+    h / 2
 }
 
-// Top edge stays square (it touches the screen edge); the bottom corners
-// are rounded with radius `rad`.
+// The notch floats just below the top edge, rounded on every corner.
 unsafe fn apply_region(hwnd: HWND, w: i32, h: i32, rad: i32) {
-    let top = CreateRectRgn(0, 0, w, (h - rad / 2).max(1));
     let round = CreateRoundRectRgn(0, 0, w + 1, h + 1, rad * 2, rad * 2);
-    CombineRgn(top, top, round, RGN_OR);
-    SetWindowRgn(hwnd, top, 1);
-    DeleteObject(round as HGDIOBJ);
+    SetWindowRgn(hwnd, round, 1);
+}
+
+fn expanded_radius() -> i32 {
+    34 * expanded_scale() / 100
+}
+
+// Gap between the screen's top edge and the notch, in pixels.
+fn top_gap() -> i32 {
+    8 * expanded_scale() / 100
 }
 
 fn lerp_i(a: i32, b: i32, t: f32) -> i32 {
@@ -545,7 +501,7 @@ fn notch_monitor() -> RECT {
 
 unsafe fn place_window(hwnd: HWND, w: i32, h: i32) {
     let m = notch_monitor();
-    SetWindowPos(hwnd, HWND_TOPMOST, m.left + (m.right - m.left - w) / 2, m.top, w, h, SWP_NOACTIVATE);
+    SetWindowPos(hwnd, HWND_TOPMOST, m.left + (m.right - m.left - w) / 2, m.top + top_gap(), w, h, SWP_NOACTIVATE);
 }
 
 // Move the notch towards the size of its current state. Size changes
@@ -556,7 +512,7 @@ unsafe fn apply_size(hwnd: HWND) {
     let open_to = if a.expanded { 1.0 } else { 0.0 };
     if target == a.cur_px && !a.animating {
         a.open_level = open_to;
-        let rad = if a.expanded { 30 } else { collapsed_radius() };
+        let rad = if a.expanded { expanded_radius() } else { collapsed_radius() };
         apply_region(hwnd, target.0, target.1, rad);
         InvalidateRect(hwnd, null(), 0);
         return;
@@ -588,7 +544,7 @@ unsafe fn anim_step(hwnd: HWND) {
     let w = lerp_i(a.anim_from.0, a.anim_to.0, e_size).max(8);
     let h = lerp_i(a.anim_from.1, a.anim_to.1, e_size).max(4);
     a.open_level = a.open_from + (a.open_to - a.open_from) * e_open;
-    let rad = lerp_i(collapsed_radius(), 30, a.open_level);
+    let rad = lerp_i(collapsed_radius(), expanded_radius(), a.open_level);
     place_window(hwnd, w, h);
     apply_region(hwnd, w, h, rad);
     a.cur_px = (w, h);
@@ -598,7 +554,7 @@ unsafe fn anim_step(hwnd: HWND) {
         a.open_level = a.open_to;
         KillTimer(hwnd, TIMER_ANIM);
         place_window(hwnd, a.cur_px.0, a.cur_px.1);
-        let rad = if a.expanded { 30 } else { collapsed_radius() };
+        let rad = if a.expanded { expanded_radius() } else { collapsed_radius() };
         apply_region(hwnd, a.cur_px.0, a.cur_px.1, rad);
     }
     InvalidateRect(hwnd, null(), 0);
@@ -606,6 +562,185 @@ unsafe fn anim_step(hwnd: HWND) {
 }
 
 // ---------- painting ----------
+// Layout follows the "Nusa Notch" design (windows/design/notch-design.html):
+// a floating black pill (clock, battery ring, sound wave, timer ring, or the
+// live lyric line) that opens into a 560 x 232 rounded card with a header
+// (page name in the page colour, clock + date), round chevrons, a page area
+// (y 44..198, x padding 48) and page dots with a gear at the bottom.
+
+// time as ("12:19", "PM") and the date as "Sun, Nov 1"
+fn time_parts() -> (String, String, String) {
+    unsafe {
+        let mut t: SYSTEMTIME = std::mem::zeroed();
+        GetLocalTime(&mut t);
+        let days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        let mons = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        let h = if t.wHour % 12 == 0 { 12 } else { t.wHour % 12 };
+        (
+            format!("{}:{:02}", h, t.wMinute),
+            if t.wHour >= 12 { "PM".into() } else { "AM".into() },
+            format!("{}, {} {}", days[t.wDayOfWeek as usize], mons[(t.wMonth - 1) as usize], t.wDay),
+        )
+    }
+}
+
+// (percent, plugged in) when the PC has a battery.
+fn battery() -> Option<(u8, bool)> {
+    unsafe {
+        let mut s: SYSTEM_POWER_STATUS = std::mem::zeroed();
+        if GetSystemPowerStatus(&mut s) == 0 {
+            return None;
+        }
+        if s.BatteryFlag == 128 || s.BatteryFlag == 255 || s.BatteryLifePercent > 100 {
+            return None;
+        }
+        Some((s.BatteryLifePercent, s.ACLineStatus == 1))
+    }
+}
+
+fn page_color(p: usize) -> u32 {
+    match p {
+        0 => cr(255, 55, 95),
+        1 => cr(191, 90, 242),
+        2 => cr(255, 159, 10),
+        3 => cr(10, 132, 255),
+        4 => cr(255, 176, 0),
+        _ => cr(48, 209, 88),
+    }
+}
+
+const PAGE_NAMES: [&str; PAGES] = ["Music", "Lyrics", "Focus timer", "Water", "Shelf", "To-do"];
+// Page icons shown on the bottom dots while hovering them ("" = droplet).
+const PAGE_ICONS: [&str; PAGES] = ["\u{e8d6}", "\u{e8e4}", "\u{e916}", "", "\u{e7b8}", "\u{e73e}"];
+
+// Pages reachable with the chevrons, dots, wheel and swipe (Lyrics only
+// when lyrics are turned on in Settings).
+fn visible_pages() -> Vec<usize> {
+    (0..PAGES).filter(|p| *p != 1 || app().store.show_lyrics).collect()
+}
+
+fn mix(a: u32, b: u32, t: f64) -> u32 {
+    let ch = |c: u32, s: u32| ((c >> s) & 0xFF) as f64;
+    let l = |s: u32| (ch(a, s) + (ch(b, s) - ch(a, s)) * t.clamp(0.0, 1.0)).round() as u32;
+    l(0) | (l(8) << 8) | (l(16) << 16)
+}
+
+// Clip the following drawing to a rounded rectangle (design units). GDI
+// clip regions are in device pixels, so the current paint scale is used.
+unsafe fn clip_round(hdc: HDC, x: i32, y: i32, w: i32, h: i32, rad: i32) {
+    let (kx, ky) = app().paint_k;
+    let r = CreateRoundRectRgn(
+        (x as f32 * kx) as i32,
+        (y as f32 * ky) as i32,
+        ((x + w) as f32 * kx) as i32 + 1,
+        ((y + h) as f32 * ky) as i32 + 1,
+        (rad as f32 * 2.0 * kx) as i32,
+        (rad as f32 * 2.0 * ky) as i32,
+    );
+    SelectClipRgn(hdc, r);
+    DeleteObject(r as HGDIOBJ);
+}
+
+unsafe fn unclip(hdc: HDC) {
+    SelectClipRgn(hdc, null_mut());
+}
+
+unsafe fn polygon(hdc: HDC, pts: &[POINT], col: u32) {
+    let brush = CreateSolidBrush(col);
+    let pen = CreatePen(PS_NULL as i32, 0, 0);
+    let ob = SelectObject(hdc, brush as HGDIOBJ);
+    let op = SelectObject(hdc, pen as HGDIOBJ);
+    Polygon(hdc, pts.as_ptr(), pts.len() as i32);
+    SelectObject(hdc, ob);
+    SelectObject(hdc, op);
+    DeleteObject(brush as HGDIOBJ);
+    DeleteObject(pen as HGDIOBJ);
+}
+
+// Stroked polyline with round caps (chevrons, check marks).
+unsafe fn stroke(hdc: HDC, pts: &[POINT], width: i32, col: u32) {
+    let lb = LOGBRUSH { lbStyle: BS_SOLID, lbColor: col, lbHatch: 0 };
+    let pen = ExtCreatePen((PS_GEOMETRIC | PS_SOLID | PS_ENDCAP_ROUND | PS_JOIN_ROUND) as u32, width as u32, &lb, 0, null());
+    let op = SelectObject(hdc, pen as HGDIOBJ);
+    Polyline(hdc, pts.as_ptr(), pts.len() as i32);
+    SelectObject(hdc, op);
+    DeleteObject(pen as HGDIOBJ);
+}
+
+unsafe fn draw_droplet(hdc: HDC, dx: i32, dy: i32, col: u32) {
+    fill_circle(hdc, dx, dy + 2, 5, col);
+    polygon(hdc, &[POINT { x: dx, y: dy - 7 }, POINT { x: dx - 4, y: dy - 1 }, POINT { x: dx + 4, y: dy - 1 }], col);
+}
+
+// Ring progress (pomodoro, battery): track + arc from 12 o'clock clockwise.
+unsafe fn ring(hdc: HDC, cx: i32, cy: i32, r: i32, width: i32, frac: f64, track: u32, col: u32) {
+    draw_arc(hdc, cx, cy, r, 0.0, 360.0, width, track);
+    if frac > 0.0 {
+        draw_arc(hdc, cx, cy, r, -90.0, 360.0 * frac.min(1.0), width, col);
+    }
+}
+
+// Battery ring (or a glowing green dot on PCs without a battery).
+unsafe fn draw_indicator(hdc: HDC, cx: i32, cy: i32) {
+    match battery() {
+        Some((pct, plugged)) => {
+            let low = pct <= 20 && !plugged;
+            ring(hdc, cx, cy, 9, 2, pct as f64 / 100.0, cr(31, 58, 40), if low { cr(255, 69, 58) } else { cr(48, 209, 88) });
+            if plugged {
+                polygon(hdc, &[
+                    POINT { x: cx + 1, y: cy - 6 },
+                    POINT { x: cx - 4, y: cy + 1 },
+                    POINT { x: cx - 1, y: cy + 1 },
+                    POINT { x: cx - 2, y: cy + 6 },
+                    POINT { x: cx + 4, y: cy - 1 },
+                    POINT { x: cx + 1, y: cy - 1 },
+                ], cr(48, 209, 88));
+            }
+        }
+        None => {
+            fill_circle(hdc, cx, cy, 6, cr(12, 52, 24));
+            fill_circle(hdc, cx, cy, 4, cr(48, 209, 88));
+        }
+    }
+}
+
+// Battery ring + "12:19 PM" (+ date), centred on cx.
+unsafe fn draw_clock(hdc: HDC, cx: i32, cy: i32, with_date: bool) {
+    let (t, ap, date) = time_parts();
+    let tw = text_width(&t, "Segoe UI", 15, 600, hdc);
+    let aw = text_width(&ap, "Segoe UI", 11, 600, hdc);
+    let dw = if with_date { 10 + text_width(&date, "Segoe UI", 12, 400, hdc) } else { 0 };
+    let total = 22 + 9 + tw + 2 + aw + dw;
+    let x = cx - total / 2;
+    draw_indicator(hdc, x + 11, cy);
+    let mut tx = x + 31;
+    draw_text(hdc, &t, tx, cy - 11, tw + 4, 22, "Segoe UI", 15, 600, WHITE, DT_LEFT);
+    tx += tw + 2;
+    draw_text(hdc, &ap, tx, cy - 9, aw + 4, 20, "Segoe UI", 11, 600, cr(161, 161, 166), DT_LEFT);
+    if with_date {
+        tx += aw + 10;
+        draw_text(hdc, &date, tx, cy - 10, dw, 20, "Segoe UI", 12, 400, cr(161, 161, 166), DT_LEFT);
+    }
+}
+
+// Four red bars bouncing like the design's wave.
+unsafe fn draw_wave(hdc: HDC, x: i32, cy: i32) {
+    let t = GetTickCount64() as f64 / 1000.0;
+    let periods = [0.9, 0.7, 1.1, 0.8];
+    let offs = [0.0, 0.3, 0.6, 0.15];
+    for i in 0..4 {
+        let ph = ((t + offs[i]) / periods[i]) * std::f64::consts::TAU;
+        let k = 0.5 - 0.5 * ph.cos();
+        let bh = (4.0 + 11.0 * k) as i32;
+        fill_round(hdc, x + i as i32 * 5, cy - bh / 2, 3, bh, 3, cr(255, 55, 95));
+    }
+}
+
+fn pomo_frac() -> f64 {
+    let a = app();
+    if a.pomo_total == 0 { 0.0 } else { a.pomo_left as f64 / a.pomo_total as f64 }
+}
+
 unsafe fn paint(hdc: HDC, w: i32, h: i32, expanded: bool) {
     fill_rect_c(hdc, 0, 0, w, h, BLACK);
     app().actions.clear();
@@ -613,90 +748,158 @@ unsafe fn paint(hdc: HDC, w: i32, h: i32, expanded: bool) {
         paint_collapsed(hdc, w, h);
         return;
     }
-    paint_strip(hdc, w);
-    paint_page(hdc, w, h);
-    // chevrons
-    for (is_prev, cx) in [(true, 22), (false, w - 22)] {
-        fill_circle(hdc, cx, h / 2, 13, cr(35, 35, 39));
-        draw_text(hdc, if is_prev { "‹" } else { "›" }, cx - 13, h / 2 - 13, 26, 26, "Segoe UI", 17, 400, cr(201, 201, 209), DT_CENTER);
-        add_action(cx - 14, h / 2 - 14, 28, 28, if is_prev { A_PREV_PAGE } else { A_NEXT_PAGE }, 0);
-    }
-    if app().dots_hover {
-        paint_page_icons(hdc, w, h);
-        return;
-    }
-    // dots
-    let dot_w = 5 * 5 + 4 * 6 + 14; // 5 dots + gaps + elongated active
-    let mut dx = (w - dot_w) / 2;
-    let dy = h - 15;
-    for i in 0..PAGES {
-        let dw = if i == app().page { 19 } else { 5 };
-        fill_round(hdc, dx, dy, dw, 5, 5, if i == app().page { WHITE } else { cr(67, 67, 75) });
-        add_action(dx - 4, dy - 6, dw + 8, 17, A_DOT, i as i32);
-        dx += dw + 6;
-    }
-}
-
-unsafe fn paint_page(hdc: HDC, w: i32, h: i32) {
-    match app().page {
+    let a = app();
+    let page = a.page;
+    // header: page name / clock + date
+    draw_text(hdc, PAGE_NAMES[page], 24, 0, 160, 44, "Segoe UI", 14, 700, page_color(page), DT_LEFT);
+    draw_clock(hdc, w / 2, 22, true);
+    // page
+    match page {
         0 => paint_music(hdc, w, h),
-        1 => paint_pomo(hdc, w, h),
-        2 => paint_water(hdc, w, h),
-        3 => paint_shelf(hdc, w, h),
+        1 => paint_lyrics(hdc, w, h),
+        2 => paint_pomo(hdc, w, h),
+        3 => paint_water(hdc, w, h),
+        4 => paint_shelf(hdc, w, h),
         _ => paint_todo(hdc, w, h),
     }
+    // round chevrons
+    let cy = h / 2 + 6;
+    for (is_prev, cx) in [(true, 24), (false, w - 24)] {
+        let hov = a.hover.0 == if is_prev { A_PREV_PAGE } else { A_NEXT_PAGE };
+        fill_circle(hdc, cx, cy, 14, if hov { cr(44, 44, 46) } else { cr(28, 28, 30) });
+        let d = if is_prev { 1 } else { -1 };
+        stroke(hdc, &[POINT { x: cx + 2 * d, y: cy - 5 }, POINT { x: cx - 3 * d, y: cy }, POINT { x: cx + 2 * d, y: cy + 5 }], 2, WHITE);
+        add_action(cx - 15, cy - 15, 30, 30, if is_prev { A_PREV_PAGE } else { A_NEXT_PAGE }, 0);
+    }
+    paint_dots(hdc, w, h);
 }
 
-// Hovering the bottom dots swaps them for one icon per page.
-unsafe fn paint_page_icons(hdc: HDC, w: i32, h: i32) {
-    const SLOT: i32 = 30;
-    let x0 = (w - SLOT * PAGES as i32) / 2;
-    let cy = h - 17;
-    for i in 0..PAGES {
-        let x = x0 + i as i32 * SLOT;
-        let active = i == app().page;
-        if active {
-            fill_round(hdc, x + 2, cy - 11, SLOT - 4, 22, 22, cr(52, 52, 58));
-        }
-        let col = if active { WHITE } else { cr(135, 135, 145) };
-        if PAGE_ICONS[i].is_empty() {
-            // droplet: round belly + pointed top
-            let (dx, dy) = (x + SLOT / 2, cy + 1);
-            fill_circle(hdc, dx, dy + 2, 5, col);
-            let pts = [
-                POINT { x: dx, y: dy - 7 },
-                POINT { x: dx - 4, y: dy - 1 },
-                POINT { x: dx + 4, y: dy - 1 },
-            ];
-            let brush = CreateSolidBrush(col);
-            let pen = CreatePen(PS_NULL as i32, 0, 0);
-            let ob = SelectObject(hdc, brush as HGDIOBJ);
-            let op = SelectObject(hdc, pen as HGDIOBJ);
-            Polygon(hdc, pts.as_ptr(), pts.len() as i32);
-            SelectObject(hdc, ob);
-            SelectObject(hdc, op);
-            DeleteObject(brush as HGDIOBJ);
-            DeleteObject(pen as HGDIOBJ);
+// Bottom page dots (active one long, in the page colour) and the gear.
+// Hovering them turns each dot into a small pill with the page icon.
+unsafe fn paint_dots(hdc: HDC, w: i32, h: i32) {
+    let a = app();
+    let pages = visible_pages();
+    let big = a.dots_hover;
+    let cy = h - 20;
+    let dot_w = |p: usize| if big { 32 } else if p == a.page { 18 } else { 7 };
+    let total: i32 = pages.iter().map(|p| dot_w(*p)).sum::<i32>() + 8 * (pages.len() as i32 - 1) + 6 + 24;
+    let mut x = (w - total) / 2;
+    for p in &pages {
+        let p = *p;
+        let on = p == a.page;
+        let dw = dot_w(p);
+        if big {
+            fill_round(hdc, x, cy - 12, dw, 24, 24, if on { page_color(p) } else { cr(28, 28, 30) });
+            if PAGE_ICONS[p].is_empty() {
+                draw_droplet(hdc, x + dw / 2, cy + 1, WHITE);
+            } else {
+                draw_text(hdc, PAGE_ICONS[p], x, cy - 12, dw, 24, "Segoe MDL2 Assets", 12, 400, WHITE, DT_CENTER);
+            }
+            add_action(x, cy - 12, dw, 24, A_DOT, p as i32);
         } else {
-            draw_text(hdc, PAGE_ICONS[i], x, cy - 11, SLOT, 22, "Segoe MDL2 Assets", 14, 400, col, DT_CENTER);
+            fill_round(hdc, x, cy - 3, dw, 7, 7, if on { page_color(p) } else { cr(72, 72, 74) });
+            add_action(x - 3, cy - 10, dw + 6, 20, A_DOT, p as i32);
         }
-        add_action(x, h - 31, SLOT, 29, A_DOT, i as i32);
+        x += dw + 8;
     }
+    // gear: opens the settings window
+    x += 6 - 8;
+    let gx = x + 12;
+    let hov = a.hover.0 == A_SETTINGS || !a.settings_hwnd.is_null();
+    fill_circle(hdc, gx, cy, 12, if hov { cr(44, 44, 46) } else { cr(28, 28, 30) });
+    draw_text(hdc, "\u{e713}", gx - 12, cy - 12, 24, 24, "Segoe MDL2 Assets", 12, 400, cr(209, 209, 214), DT_CENTER);
+    add_action(gx - 13, cy - 13, 26, 26, A_SETTINGS, 0);
+}
+
+// ---------- minimized pill ----------
+// What the minimized notch shows right now.
+#[derive(PartialEq, Clone, Copy)]
+enum Mini {
+    Alert,
+    Tab,
+    Lyric,
+    Wide, // clock with the wave and/or the timer ring
+    Clock,
+}
+
+fn music_playing() -> bool {
+    let m = media::snapshot();
+    m.present && m.playing
+}
+
+fn mini_lyric_line() -> Option<String> {
+    let a = app();
+    if !a.store.show_lyrics || !music_playing() {
+        return None;
+    }
+    // closed on the Lyrics page, or "Lyrics in the minimized notch" is on
+    if a.page != 1 && !(a.store.mini_player && a.store.mini_lyrics) {
+        return None;
+    }
+    live_lyric(&media::snapshot())
+}
+
+fn mini_mode() -> Mini {
+    let a = app();
+    if a.alert_until > 0 {
+        return Mini::Alert;
+    }
+    let playing = a.store.mini_player && music_playing();
+    if mini_lyric_line().is_some() {
+        return Mini::Lyric;
+    }
+    if playing || a.pomo_running {
+        return Mini::Wide;
+    }
+    if a.store.tiny_tab {
+        return Mini::Tab;
+    }
+    Mini::Clock
+}
+
+fn mini_active() -> bool {
+    matches!(mini_mode(), Mini::Lyric | Mini::Wide)
 }
 
 unsafe fn paint_collapsed(hdc: HDC, w: i32, h: i32) {
-    if mini_active() {
-        paint_mini(hdc, w, h);
-        return;
+    let a = app();
+    let cy = h / 2;
+    match mini_mode() {
+        Mini::Alert => {
+            // "Charging" popup
+            let pct = battery().map(|b| b.0).unwrap_or(0);
+            fill_circle(hdc, 38, cy, 18, cr(28, 28, 30));
+            polygon(hdc, &[
+                POINT { x: 39, y: cy - 9 },
+                POINT { x: 31, y: cy + 2 },
+                POINT { x: 37, y: cy + 2 },
+                POINT { x: 36, y: cy + 9 },
+                POINT { x: 45, y: cy - 2 },
+                POINT { x: 39, y: cy - 2 },
+            ], cr(48, 209, 88));
+            draw_text(hdc, "Charging", 68, cy - 19, 160, 20, "Segoe UI", 14, 600, WHITE, DT_LEFT);
+            draw_text(hdc, "Charger connected", 68, cy + 1, 160, 18, "Segoe UI", 12, 400, cr(161, 161, 166), DT_LEFT);
+            draw_text(hdc, &format!("{}%", pct), w - 90, 0, 70, h, "Segoe UI", 14, 600, cr(48, 209, 88), DT_RIGHT);
+        }
+        Mini::Tab => {
+            fill_circle(hdc, w / 2, cy, 3, cr(48, 209, 88));
+        }
+        mode => {
+            if a.pomo_running {
+                ring(hdc, 24, cy, 8, 3, pomo_frac(), cr(58, 42, 16), cr(255, 159, 10));
+            }
+            if a.store.mini_player && music_playing() {
+                draw_wave(hdc, w - 14 - 18, cy);
+            }
+            if mode == Mini::Lyric {
+                let line = mini_lyric_line().unwrap_or_default();
+                let text = if line == "\u{266a}" { line } else { format!("\u{266a}  {}", line) };
+                draw_text(hdc, &text, (w - 240) / 2, 0, 240, h, "Segoe UI", 13, 500, WHITE, DT_CENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+            } else {
+                draw_clock(hdc, w / 2, cy, false);
+            }
+        }
     }
-    if !app().store.minimal {
-        let (_, time) = clock_strings();
-        fill_circle(hdc, 18, h / 2, 3, GREEN);
-        draw_text(hdc, &time, 0, 0, w, h, "Segoe UI", 13, 650, WHITE, DT_CENTER);
-        return;
-    }
-    // Just the tab: black sliver + one small green dot as the cue.
-    fill_circle(hdc, w / 2, h / 2 + 1, 3, GREEN);
 }
 
 // The current synced lyric line, if there is one for the playing track.
@@ -714,98 +917,6 @@ fn live_lyric(m: &media::MediaInfo) -> Option<String> {
         return Some(if line.is_empty() { "\u{266a}".into() } else { line });
     }
     None
-}
-
-// Minimized mini player (design 340 x 34): album art on the left, the live
-// lyric line (or the song) in the middle, a moving sound wave on the right.
-unsafe fn paint_mini(hdc: HDC, w: i32, h: i32) {
-    let m = media::snapshot();
-    let lyric = if app().store.mini_lyrics && app().store.show_lyrics { live_lyric(&m) } else { None };
-    if lyric.is_some() {
-        // soft red glow behind the lyric, fading out to the black edges
-        let (x0, x1) = (40, w - 46);
-        let steps = 32;
-        for i in 0..steps {
-            let t = (i as f64 + 0.5) / steps as f64;
-            let k = 1.0 - (2.0 * t - 1.0).abs(); // 0 at the edges, 1 in the middle
-            let k = k.powf(0.8);
-            let col = cr((6.0 + 56.0 * k) as u32, (6.0 + 8.0 * k) as u32, (7.0 + 16.0 * k) as u32);
-            let sx = x0 + (x1 - x0) * i / steps;
-            let ex = x0 + (x1 - x0) * (i + 1) / steps;
-            fill_rect_c(hdc, sx, 4, ex - sx, h - 8, col);
-        }
-    }
-    draw_art(hdc, 8, 5, h - 10, 7, 12, true);
-    let text = match lyric {
-        Some(l) => l,
-        None => {
-            if m.artist.is_empty() { m.title.clone() } else { format!("{} \u{2014} {}", m.title, m.artist) }
-        }
-    };
-    draw_text(hdc, &text, 44, 0, w - 96, h, "Segoe UI", 13, 600, cr(236, 232, 238), DT_CENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-    // sound wave: five bars bouncing at different speeds
-    let t = GetTickCount64() as f64 / 1000.0;
-    let speeds = [7.1, 9.3, 6.2, 8.4, 5.6];
-    let base_x = w - 42;
-    for (i, sp) in speeds.iter().enumerate() {
-        let k = ((t * sp + i as f64 * 1.7).sin() * 0.5 + 0.5) * 0.85 + 0.15;
-        let bh = (4.0 + 14.0 * k) as i32;
-        let bx = base_x + i as i32 * 6;
-        fill_round(hdc, bx, (h - bh) / 2, 3, bh, 3, cr(196, 164, 214));
-    }
-}
-
-unsafe fn paint_strip(hdc: HDC, w: i32) {
-    let a = app();
-    // left title
-    match a.page {
-        0 if a.lyrics_open => {
-            // back to the player
-            draw_text(hdc, "\u{e72b}", 16, 0, 20, 38, "Segoe MDL2 Assets", 12, 400, DIM, DT_CENTER);
-            draw_text(hdc, "Lyrics", 40, 0, 80, 38, "Segoe UI", 15, 650, WHITE, DT_LEFT);
-            add_action(10, 4, 110, 30, A_LYRICS, 0);
-        }
-        1 => draw_text(hdc, "Pomodoro", 20, 0, 130, 38, "Segoe UI", 15, 650, WHITE, DT_LEFT),
-        2 => {
-            draw_text(hdc, "Water", 20, 0, 60, 38, "Segoe UI", 15, 650, CYAN, DT_LEFT);
-            let ww = text_width("Water ", "Segoe UI", 15, 650, hdc);
-            draw_text(hdc, "Reminder", 20 + ww, 0, 90, 38, "Segoe UI", 15, 650, WHITE, DT_LEFT);
-        }
-        3 => draw_text(hdc, "Shelf", 20, 0, 80, 38, "Segoe UI", 15, 650, WHITE, DT_LEFT),
-        4 => {
-            draw_text(hdc, "Todo", 20, 0, 50, 38, "Segoe UI", 15, 650, WHITE, DT_LEFT);
-            let ww = text_width("Todo", "Segoe UI", 15, 650, hdc);
-            draw_text(hdc, "List", 20 + ww, 0, 50, 38, "Segoe UI", 15, 650, GREEN, DT_LEFT);
-        }
-        _ => {}
-    }
-    // centre: bolt + date + time
-    let (date, time) = clock_strings();
-    let dw = text_width(&date, "Segoe UI", 13, 400, hdc);
-    let tw = text_width(&time, "Segoe UI", 13, 700, hdc);
-    let total = 17 + 7 + dw + 8 + tw;
-    let mut x = (w - total) / 2;
-    draw_bolt(hdc, x + 8, 19, 8);
-    x += 24;
-    draw_text(hdc, &date, x, 0, dw + 4, 38, "Segoe UI", 13, 400, cr(232, 232, 236), DT_LEFT);
-    x += dw + 8;
-    draw_text(hdc, &time, x, 0, tw + 4, 38, "Segoe UI", 13, 700, WHITE, DT_LEFT);
-    // right actions (shifted left to make room for the settings gear)
-    {
-        if a.page == 2 {
-            fill_round(hdc, w - 110, 6, 44, 26, 26, CARD2);
-            draw_text(hdc, "\u{ea8f}", w - 110, 6, 44, 26, "Segoe MDL2 Assets", 12, 400, WHITE, DT_CENTER);
-            add_action(w - 110, 6, 44, 26, A_WATER_BELL, 0);
-        } else if a.page == 3 {
-            draw_text(hdc, "\u{ea8f}", w - 90, 0, 26, 38, "Segoe MDL2 Assets", 14, 400, WHITE, DT_CENTER);
-            fill_circle(hdc, w - 68, 9, 3, RED);
-        }
-    }
-    // settings gear, top right on every page
-    let (gx, gy) = (w - 34, 19);
-    fill_circle(hdc, gx, gy, 13, if !a.settings_hwnd.is_null() { cr(58, 58, 65) } else { cr(35, 35, 39) });
-    draw_text(hdc, "\u{e713}", gx - 13, gy - 13, 26, 26, "Segoe MDL2 Assets", 13, 400, WHITE, DT_CENTER);
-    add_action(gx - 14, gy - 14, 28, 28, A_SETTINGS, 0);
 }
 
 // GDI bitmap for the current album art, rebuilt only when the decoded
@@ -846,132 +957,367 @@ unsafe fn thumb_bitmap(hdc: HDC) -> Option<(HBITMAP, i32)> {
     }
 }
 
-// Album art square: the real thumbnail when the media session has one,
-// otherwise a tinted tile with a music note.
-unsafe fn draw_art(hdc: HDC, x: i32, y: i32, size: i32, rad: i32, glyph_size: i32, present: bool) {
-    if present {
-        if let Some((bmp, bsize)) = thumb_bitmap(hdc) {
-            let src = CreateCompatibleDC(hdc);
-            let old = SelectObject(src, bmp as HGDIOBJ);
-            SetStretchBltMode(hdc, HALFTONE);
-            SetBrushOrgEx(hdc, 0, 0, null_mut());
-            StretchBlt(hdc, x, y, size, size, src, 0, 0, bsize, bsize, SRCCOPY);
-            SelectObject(src, old);
-            DeleteDC(src);
-            return;
-        }
-    }
-    fill_round(hdc, x, y, size, size, rad, if present { cr(45, 60, 160) } else { CARD2 });
-    draw_text(hdc, "\u{e8d6}", x, y, size, size, "Segoe MDL2 Assets", glyph_size, 400, if present { WHITE } else { cr(142, 142, 152) }, DT_CENTER);
-}
-
-unsafe fn paint_music(hdc: HDC, w: i32, h: i32) {
-    let m = media::snapshot();
-    if app().lyrics_open {
-        paint_lyrics(hdc, w, h, &m);
+// Album art with rounded corners: the real thumbnail when the media session
+// has one, otherwise the design's peach -> lilac -> sky gradient with a note.
+unsafe fn draw_art(hdc: HDC, x: i32, y: i32, size: i32, rad: i32, note: bool) {
+    clip_round(hdc, x, y, size, size, rad);
+    if let Some((bmp, bsize)) = thumb_bitmap(hdc) {
+        let src = CreateCompatibleDC(hdc);
+        let old = SelectObject(src, bmp as HGDIOBJ);
+        SetStretchBltMode(hdc, HALFTONE);
+        SetBrushOrgEx(hdc, 0, 0, null_mut());
+        StretchBlt(hdc, x, y, size, size, src, 0, 0, bsize, bsize, SRCCOPY);
+        SelectObject(src, old);
+        DeleteDC(src);
+        unclip(hdc);
         return;
     }
-    // art
-    draw_art(hdc, 40, 50, 88, 16, 34, m.present);
-    // title / artist
-    let title = if m.present && !m.title.is_empty() { m.title.clone() } else if m.present { "Playing".into() } else { "Not Playing".into() };
-    draw_text(hdc, &title, 146, 62, w - 190, 30, "Segoe UI", 20, 700, WHITE, DT_LEFT);
-    if m.present && !m.artist.is_empty() {
-        draw_text(hdc, &m.artist.clone(), 146, 94, w - 190, 22, "Segoe UI", 13, 400, DIM, DT_LEFT);
+    // 135deg gradient as diagonal bands
+    let (c1, c2, c3) = (cr(255, 154, 139), cr(161, 140, 209), cr(90, 200, 250));
+    let n = 28;
+    for i in 0..n {
+        let t = (i as f64 + 0.5) / n as f64;
+        let col = if t < 0.6 { mix(c1, c2, t / 0.6) } else { mix(c2, c3, (t - 0.6) / 0.4) };
+        let d0 = 2 * size * i / n;
+        let d1 = 2 * size * (i + 1) / n + 1;
+        polygon(hdc, &[
+            POINT { x: x + d0, y },
+            POINT { x: x + d1, y },
+            POINT { x, y: y + d1 },
+            POINT { x, y: y + d0 },
+        ], col);
     }
-    // seek
-    let pos = media::live_position(&m);
-    let frac = if m.duration_secs > 0.0 { (pos / m.duration_secs).clamp(0.0, 1.0) } else { 0.0 };
-    draw_text(hdc, &fmt_mmss(pos), 40, 148, 40, 20, "Segoe UI", 13, 400, DIM, DT_LEFT);
-    draw_text(hdc, &format!("-{}", fmt_mmss(m.duration_secs - pos)), w - 80, 148, 40, 20, "Segoe UI", 13, 400, DIM, DT_RIGHT);
-    fill_round(hdc, 88, 155, w - 176, 5, 5, cr(43, 43, 49));
-    if frac > 0.0 {
-        fill_round(hdc, 88, 155, ((w - 176) as f64 * frac) as i32, 5, 5, cr(233, 233, 238));
-    }
-    add_action(88, 146, w - 176, 22, A_SEEK, 0);
-    // bottom row: lyrics btn / controls / volume
-    if m.present && app().store.show_lyrics {
-        draw_text(hdc, "\u{e8f2}", 38, 176, 30, 26, "Segoe MDL2 Assets", 17, 400, cr(142, 142, 152), DT_CENTER);
-        add_action(34, 172, 38, 32, A_LYRICS, 0);
-    }
-    let cx = w / 2;
-    let col = if m.present { cr(215, 215, 222) } else { FAINT };
-    draw_text(hdc, "\u{e892}", cx - 78, 176, 30, 26, "Segoe MDL2 Assets", 17, 400, col, DT_CENTER);
-    draw_text(hdc, if m.playing { "\u{e769}" } else { "\u{e768}" }, cx - 15, 176, 30, 26, "Segoe MDL2 Assets", 18, 400, col, DT_CENTER);
-    draw_text(hdc, "\u{e893}", cx + 48, 176, 30, 26, "Segoe MDL2 Assets", 17, 400, col, DT_CENTER);
-    if m.present {
-        add_action(cx - 82, 172, 38, 32, A_PREV_TRACK, 0);
-        add_action(cx - 19, 172, 38, 32, A_PLAYPAUSE, 0);
-        add_action(cx + 44, 172, 38, 32, A_NEXT_TRACK, 0);
-    }
-    // speaker button (click = mute) with the slider on the same row,
-    // between the next-track button and the speaker
-    let (lvl, muted) = (app().vol_level, app().vol_muted);
-    let silent = muted || lvl <= 0.0;
-    draw_text(hdc, if silent { "\u{e74f}" } else { "\u{e767}" }, w - 68, 176, 30, 26, "Segoe MDL2 Assets", 17, 400, col, DT_CENTER);
-    if m.present {
-        add_action(w - 72, 172, 38, 32, A_VOL_MUTE, 0);
-        let (bx, bw) = vol_bar_geom();
-        let by = 186; // 6 tall, centred on the row (centre y = 189)
-        fill_round(hdc, bx, by, bw, 6, 6, cr(43, 43, 49));
-        let fw = if silent { 0 } else { (bw as f32 * lvl) as i32 };
-        if fw > 0 {
-            fill_round(hdc, bx, by, fw.max(6), 6, 6, cr(233, 233, 238));
-        }
-        fill_circle(hdc, bx + fw.clamp(3, bw - 3), by + 3, 5, WHITE);
-        add_action(bx - 6, 172, bw + 12, 32, A_VOL_BAR, 0);
+    unclip(hdc);
+    if note {
+        draw_text(hdc, "\u{e8d6}", x, y, size, size, "Segoe MDL2 Assets", size * 2 / 5, 400, cr(240, 240, 245), DT_CENTER);
     }
 }
 
-// Lyrics page: only the lyrics, across the whole notch. The current line
-// is big and white; click any line to jump there.
-unsafe fn paint_lyrics(hdc: HDC, w: i32, h: i32, m: &media::MediaInfo) {
-    let (px, py) = (48, 42);
-    let (pw, ph) = (w - 96, h - 42 - 28);
-    // dark red wash, strongest in the middle row
-    let steps = 24;
-    for i in 0..steps {
-        let t = (i as f64 + 0.5) / steps as f64;
-        let k = (1.0 - (2.0 * t - 1.0).abs()).powf(0.7);
-        let col = cr((10.0 + 42.0 * k) as u32, (8.0 + 6.0 * k) as u32, (9.0 + 14.0 * k) as u32);
-        fill_rect_c(hdc, px - 34, py + ph * i / steps, pw + 68, ph / steps + 1, col);
+// ---------- pages ----------
+// Page area: y 50..192 (centre 121), x 48..w-48.
+const PY0: i32 = 50;
+const PMID: i32 = 121;
+
+unsafe fn pill_btn(hdc: HDC, x: i32, y: i32, label: &str, size: i32, weight: i32, pad: i32, h: i32, bg: u32, fg: u32, code: i32, param: i32) -> i32 {
+    let tw = text_width(label, "Segoe UI", size, weight, hdc);
+    let bw = tw + pad * 2;
+    let hov = app().hover == (code, param);
+    let bg = if hov { mix(bg, WHITE, 0.12) } else { bg };
+    fill_round(hdc, x, y, bw, h, h, bg);
+    draw_text(hdc, label, x, y, bw, h, "Segoe UI", size, weight, fg, DT_CENTER);
+    add_action(x, y, bw, h, code, param);
+    bw
+}
+
+unsafe fn paint_music(hdc: HDC, w: i32, _h: i32) {
+    let a = app();
+    let m = media::snapshot();
+    draw_art(hdc, 48, PMID - 48, 96, 14, true);
+    let cx0 = 48 + 96 + 18;
+    let cw = w - 48 - cx0;
+    let title = if m.present && !m.title.is_empty() { m.title.clone() } else if m.present { "Playing".into() } else { "Not Playing".into() };
+    draw_text(hdc, &title, cx0, 70, cw, 21, "Segoe UI", 16, 600, WHITE, DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+    let sub = if m.present { m.artist.clone() } else { "Play something in any app".into() };
+    draw_text(hdc, &sub, cx0, 91, cw, 17, "Segoe UI", 12, 400, cr(161, 161, 166), DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+    // progress
+    let pos = media::live_position(&m);
+    let frac = if m.duration_secs > 0.0 { (pos / m.duration_secs).clamp(0.0, 1.0) } else { 0.0 };
+    let py = 123;
+    draw_text(hdc, &fmt_mmss(pos), cx0, py - 8, 36, 16, "Segoe UI", 11, 400, cr(161, 161, 166), DT_LEFT);
+    draw_text(hdc, &format!("\u{2212}{}", fmt_mmss(m.duration_secs - pos)), w - 48 - 40, py - 8, 40, 16, "Segoe UI", 11, 400, cr(161, 161, 166), DT_RIGHT);
+    let (bx, bw) = (cx0 + 40, cw - 84);
+    a.seek_bar = (bx, bw);
+    fill_round(hdc, bx, py - 2, bw, 4, 4, cr(58, 58, 60));
+    if frac > 0.0 {
+        fill_round(hdc, bx, py - 2, ((bw as f64 * frac) as i32).max(4), 4, 4, WHITE);
+    }
+    if m.present && m.duration_secs > 0.0 {
+        add_action(bx, py - 8, bw, 16, A_SEEK, 0);
+    }
+    // controls, centred in the column
+    let cy = 147;
+    let mid = cx0 + cw / 2;
+    let col = if m.present { WHITE } else { cr(99, 99, 108) };
+    let btn = |hdc: HDC, cx: i32, glyph: &str, size: i32, box_: i32, code: i32| {
+        if app().hover.0 == code && m.present {
+            fill_circle(hdc, cx, cy, box_ / 2, cr(44, 44, 46));
+        }
+        draw_text(hdc, glyph, cx - box_ / 2, cy - box_ / 2, box_, box_, "Segoe MDL2 Assets", size, 400, col, DT_CENTER);
+        if m.present {
+            add_action(cx - box_ / 2, cy - box_ / 2, box_, box_, code, 0);
+        }
+    };
+    btn(hdc, mid - 57, "\u{e892}", 15, 28, A_PREV_TRACK);
+    btn(hdc, mid, if m.playing { "\u{e769}" } else { "\u{e768}" }, 20, 34, A_PLAYPAUSE);
+    btn(hdc, mid + 57, "\u{e893}", 15, 28, A_NEXT_TRACK);
+    // volume: speaker button on the right; the slider slides out on hover
+    let (lvl, muted) = (a.vol_level, a.vol_muted);
+    let silent = muted || lvl <= 0.0;
+    let vx = w - 48 - 14;
+    let show_slider = a.vol_drag || a.hover.0 == A_VOL_MUTE || a.hover.0 == A_VOL_BAR;
+    if a.hover.0 == A_VOL_MUTE {
+        fill_circle(hdc, vx, cy, 14, cr(44, 44, 46));
+    }
+    draw_text(hdc, if silent { "\u{e74f}" } else { "\u{e767}" }, vx - 14, cy - 14, 28, 28, "Segoe MDL2 Assets", 15, 400, WHITE, DT_CENTER);
+    add_action(vx - 14, cy - 14, 28, 28, A_VOL_MUTE, 0);
+    let (sx, sw) = vol_bar_geom();
+    if show_slider {
+        fill_rect_c(hdc, sx - 8, cy - 14, sw + 8, 28, BLACK); // over the next button
+        fill_round(hdc, sx, cy - 2, sw, 4, 4, cr(58, 58, 60));
+        let fw = if silent { 0 } else { (sw as f32 * lvl) as i32 };
+        if fw > 0 {
+            fill_round(hdc, sx, cy - 2, fw.max(4), 4, 4, WHITE);
+        }
+        fill_circle(hdc, sx + fw.clamp(6, sw - 6), cy, 6, WHITE);
+        add_action(sx - 4, cy - 14, sw + 6, 28, A_VOL_BAR, 0);
+    }
+}
+
+// Lyrics page: the art on the left, the synced lines on the right with the
+// current one white and a touch larger. Click a line to jump there.
+unsafe fn paint_lyrics(hdc: HDC, w: i32, _h: i32) {
+    let m = media::snapshot();
+    draw_art(hdc, 48, PMID - 42, 84, 14, true);
+    let lx = 48 + 84 + 18;
+    let lw = w - 48 - lx;
+    let grey = cr(99, 99, 102);
+    if !m.present {
+        draw_text(hdc, "Nothing is playing", lx, PMID - 12, lw, 24, "Segoe UI", 15, 600, grey, DT_LEFT);
+        return;
     }
     match lyrics::state() {
         lyrics::LyricsState::Loading | lyrics::LyricsState::Idle => {
-            draw_text(hdc, "Loading lyrics", px, py, pw, ph, "Segoe UI", 15, 600, WHITE, DT_CENTER);
+            draw_text(hdc, "Loading lyrics\u{2026}", lx, PMID - 12, lw, 24, "Segoe UI", 15, 600, grey, DT_LEFT);
         }
         lyrics::LyricsState::NotAvailable => {
-            draw_text(hdc, "Lyrics not available", px, py + ph / 2 - 26, pw, 28, "Segoe UI", 15, 600, WHITE, DT_CENTER);
+            draw_text(hdc, "Lyrics not available", lx, PMID - 22, lw, 24, "Segoe UI", 15, 600, WHITE, DT_LEFT);
             let why = lyrics::info();
             if !why.is_empty() {
-                draw_text(hdc, &why, px, py + ph / 2 + 4, pw, 22, "Segoe UI", 11, 400, DIM, DT_CENTER | DT_END_ELLIPSIS);
+                draw_text(hdc, &why, lx, PMID + 4, lw, 18, "Segoe UI", 11, 400, cr(142, 142, 147), DT_LEFT | DT_END_ELLIPSIS);
             }
         }
         lyrics::LyricsState::Ready(lines) => {
-            if lyrics::info() == "unsynced lyrics" {
-                draw_text(hdc, "unsynced", px - 26, py + 2, 90, 18, "Segoe UI", 10, 400, FAINT, DT_LEFT);
-            }
-            let cur = lyrics::current_line(&lines, media::live_position(m));
-            let row_h = 30;
-            let mid_y = py + ph / 2 - row_h / 2;
+            let unsynced = lyrics::info() == "unsynced lyrics";
+            let cur = if unsynced { 0 } else { lyrics::current_line(&lines, media::live_position(&m)) };
+            let pitch = 26;
             for slot in -2i32..=2 {
                 let idx = cur as i32 + slot;
                 if idx < 0 || idx as usize >= lines.len() {
                     continue;
                 }
                 let (t, line) = &lines[idx as usize];
-                let (size, weight, col) = match slot.abs() {
-                    0 => (19, 700, WHITE),
-                    1 => (15, 550, cr(190, 170, 178)),
-                    _ => (14, 500, cr(120, 108, 116)),
-                };
-                let y = mid_y + slot * row_h;
+                let on = slot == 0 && !unsynced;
+                let y = PMID - pitch / 2 + slot * pitch;
                 let text = if line.trim().is_empty() { "\u{266a}" } else { line.as_str() };
-                draw_text(hdc, text, px, y, pw, row_h, "Segoe UI", size, weight, col, DT_CENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-                add_action(px, y, pw, row_h, A_LYRIC_LINE, (*t * 10.0) as i32);
+                let hov = app().hover == (A_LYRIC_LINE, (*t * 10.0) as i32);
+                let col = if on { WHITE } else if hov { cr(150, 150, 155) } else { grey };
+                draw_text(hdc, text, lx, y, lw, pitch, "Segoe UI", if on { 16 } else { 15 }, if on { 700 } else { 600 }, col, DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+                if !unsynced {
+                    add_action(lx, y, lw, pitch, A_LYRIC_LINE, (*t * 10.0) as i32);
+                }
             }
         }
     }
+}
+
+unsafe fn paint_pomo(hdc: HDC, w: i32, _h: i32) {
+    let a = app();
+    let (rcx, rcy) = (48 + 52, PMID);
+    ring(hdc, rcx, rcy, 46, 7, pomo_frac(), cr(44, 44, 46), cr(255, 159, 10));
+    draw_text(hdc, &fmt_mmss(a.pomo_left as f64), rcx - 50, rcy - 16, 100, 32, "Segoe UI", 24, 600, WHITE, DT_CENTER);
+    let cx0 = 48 + 104 + 18;
+    let cw = w - 48 - cx0;
+    draw_text(hdc, "Pomodoro", cx0, 66, cw, 21, "Segoe UI", 16, 600, WHITE, DT_LEFT);
+    let label = a.pomo_label.clone();
+    draw_text(hdc, &label, cx0, 87, cw, 17, "Segoe UI", 12, 400, cr(161, 161, 166), DT_LEFT);
+    // phase pills
+    let mut x = cx0;
+    for (name, param, on) in [("Short Break", 5, a.pomo_mode != 0), ("Focus", 25, a.pomo_mode == 0)] {
+        let (bg, fg) = if on { (WHITE, BLACK) } else { (cr(44, 44, 46), WHITE) };
+        x += pill_btn(hdc, x, 112, name, 12, 500, 12, 26, bg, fg, A_POMO_MODE, param) + 6;
+    }
+    // start / pause (+ reset once the timer has moved)
+    let bw = pill_btn(hdc, cx0, 146, if a.pomo_running { "Pause" } else { "Start" }, 13, 600, 16, 29, BLUE, WHITE, A_POMO_PLAY, 0);
+    if a.pomo_left != a.pomo_total {
+        pill_btn(hdc, cx0 + bw + 6, 146, "Reset", 13, 600, 16, 29, cr(44, 44, 46), WHITE, A_POMO_RESET, 0);
+    }
+}
+
+unsafe fn paint_water(hdc: HDC, w: i32, _h: i32) {
+    let a = app();
+    let ml = a.store.water_ml;
+    let goal = a.store.water_goal.max(1);
+    let pct = ((ml as f64 / goal as f64) * 100.0).round().min(100.0) as i32;
+    let x0 = 48;
+    draw_text(hdc, "Water Reminder", x0, 66, 200, 17, "Segoe UI", 12, 400, cr(161, 161, 166), DT_LEFT);
+    let litres = |v: i32| {
+        let s = format!("{:.2}", v as f64 / 1000.0);
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    };
+    let amt = litres(ml);
+    let aw = text_width(&amt, "Segoe UI", 30, 700, hdc);
+    draw_text(hdc, &amt, x0, 83, aw + 4, 40, "Segoe UI", 30, 700, WHITE, DT_LEFT);
+    draw_text(hdc, &format!("/ {} L", litres(goal)), x0 + aw + 7, 92, 100, 26, "Segoe UI", 15, 500, cr(161, 161, 166), DT_LEFT);
+    // "Today · 60% · Keep going"
+    let p1 = "Today \u{00b7} ";
+    let p2 = format!("{}%", pct);
+    let p3 = if ml >= goal { " \u{00b7} Goal reached" } else { " \u{00b7} Keep going" };
+    let w1 = text_width(p1, "Segoe UI", 12, 400, hdc);
+    let w2 = text_width(&p2, "Segoe UI", 12, 700, hdc);
+    draw_text(hdc, p1, x0, 123, w1 + 2, 17, "Segoe UI", 12, 400, cr(161, 161, 166), DT_LEFT);
+    draw_text(hdc, &p2, x0 + w1, 123, w2 + 2, 17, "Segoe UI", 12, 700, WHITE, DT_LEFT);
+    draw_text(hdc, p3, x0 + w1 + w2, 123, 200 - w1 - w2, 17, "Segoe UI", 12, 400, cr(161, 161, 166), DT_LEFT);
+    pill_btn(hdc, x0, 148, "Drink", 13, 600, 16, 29, BLUE, WHITE, A_DRINK, 0);
+    // drinks by hour
+    let bx0 = x0 + 200 + 18;
+    let (by0, bh) = (PMID - 42, 84);
+    fill_rect_c(hdc, bx0, by0, 1, bh, cr(58, 58, 60));
+    let log: Vec<(i32, i32)> = {
+        let l = &a.store.water_log;
+        l[l.len().saturating_sub(6)..].to_vec()
+    };
+    if log.is_empty() {
+        draw_text(hdc, "No drinks yet today", bx0 + 7, by0, w - 48 - bx0 - 7, bh, "Segoe UI", 12, 400, cr(142, 142, 147), DT_CENTER);
+        return;
+    }
+    let maxv = log.iter().map(|e| e.1).max().unwrap_or(1).max(500) as f64;
+    let area_x = bx0 + 7;
+    let area_w = w - 48 - area_x - 18; // room for the "ml" label
+    let n = log.len() as i32;
+    let gap = 10;
+    let colw = ((area_w - gap * (n - 1)) / n).min(40);
+    for (i, (hr, v)) in log.iter().enumerate() {
+        let x = area_x + i as i32 * (colw + gap);
+        let hpx = ((*v as f64 / maxv) * 60.0).max(3.0) as i32;
+        fill_round(hdc, x, by0 + bh - 16 - hpx, colw, hpx, 8, BLUE);
+        draw_text(hdc, &format!("{:02}", hr), x, by0 + bh - 14, colw, 14, "Segoe UI", 10, 400, cr(142, 142, 147), DT_CENTER);
+    }
+    draw_text(hdc, "ml", w - 48 - 16, by0 + bh - 14, 16, 14, "Segoe UI", 10, 400, cr(142, 142, 147), DT_RIGHT);
+}
+
+unsafe fn paint_shelf(hdc: HDC, w: i32, h: i32) {
+    let a = app();
+    let gap = 18;
+    let colw = (w - 96 - gap) / 2;
+    let fx = 48;
+    // files column
+    let n = a.shelf_items.len().min(3) as i32;
+    let rows_h = if n == 0 { 30 } else { n * 36 + (n - 1) * 6 };
+    let more = a.shelf_items.len() as i32 - n;
+    let total = 18 + 6 + rows_h + if more > 0 { 18 } else { 0 };
+    let mut y = PMID - total / 2;
+    draw_text(hdc, "Shelf", fx, y, 80, 18, "Segoe UI", 12, 400, cr(161, 161, 166), DT_LEFT);
+    if !a.shelf_items.is_empty() {
+        let tw = text_width("Clear", "Segoe UI", 11, 600, hdc) + 20;
+        pill_btn(hdc, fx + colw - tw, y, "Clear", 11, 600, 10, 18, cr(44, 44, 46), WHITE, A_SHELF_CLEAR, 0);
+    }
+    y += 24;
+    if n == 0 {
+        draw_text(hdc, "Nothing here yet", fx, y, colw, 30, "Segoe UI", 12, 400, cr(99, 99, 108), DT_LEFT);
+    }
+    for (i, item) in a.shelf_items.iter().take(3).enumerate() {
+        fill_round(hdc, fx, y, colw, 36, 20, cr(28, 28, 30));
+        // icon tile: folder amber, file green -> blue
+        let is_dir = std::fs::metadata(&item.path).map(|m| m.is_dir()).unwrap_or(false);
+        if is_dir {
+            fill_round(hdc, fx + 10, y + 6, 24, 24, 12, cr(255, 176, 0));
+        } else {
+            clip_round(hdc, fx + 10, y + 6, 24, 24, 6);
+            for k in 0..12 {
+                let col = mix(cr(52, 199, 89), BLUE, k as f64 / 11.0);
+                fill_rect_c(hdc, fx + 10 + k * 2, y + 6, 3, 24, col);
+            }
+            unclip(hdc);
+        }
+        let hov = a.hover.1 == i as i32 && (a.hover.0 == A_SHELF_OPEN || a.hover.0 == A_SHELF_REMOVE);
+        draw_text(hdc, &item.name.clone(), fx + 44, y, colw - 44 - 64, 36, "Segoe UI", 13, 400, WHITE, DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+        add_action(fx, y, colw - 30, 36, A_SHELF_OPEN, i as i32);
+        if hov {
+            draw_text(hdc, "\u{2715}", fx + colw - 30, y, 20, 36, "Segoe UI", 11, 400, cr(255, 107, 97), DT_CENTER);
+            add_action(fx + colw - 32, y, 30, 36, A_SHELF_REMOVE, i as i32);
+        } else {
+            draw_text(hdc, &item.size.clone(), fx + colw - 70, y, 60, 36, "Segoe UI", 11, 400, cr(142, 142, 147), DT_RIGHT);
+        }
+        y += 42;
+    }
+    if more > 0 {
+        draw_text(hdc, &format!("+{} more", more), fx, y - 4, colw, 18, "Segoe UI", 11, 400, cr(99, 99, 108), DT_LEFT);
+    }
+    // drop zone
+    let dx = fx + colw + gap;
+    let (dy, dh) = (PY0, h - 34 - 6 - PY0);
+    let lb = LOGBRUSH { lbStyle: BS_SOLID, lbColor: cr(72, 72, 74), lbHatch: 0 };
+    let pen = ExtCreatePen((PS_GEOMETRIC | PS_DASH) as u32, 2, &lb, 0, null());
+    let op = SelectObject(hdc, pen as HGDIOBJ);
+    let ob = SelectObject(hdc, GetStockObject(NULL_BRUSH as i32));
+    RoundRect(hdc, dx, dy, dx + colw, dy + dh, 28, 28);
+    SelectObject(hdc, op);
+    SelectObject(hdc, ob);
+    DeleteObject(pen as HGDIOBJ);
+    let my = dy + dh / 2;
+    draw_text(hdc, "Drop files here", dx, my - 24, colw, 20, "Segoe UI", 13, 600, WHITE, DT_CENTER);
+    draw_text(hdc, "Release to add", dx, my - 3, colw, 16, "Segoe UI", 11, 400, cr(142, 142, 147), DT_CENTER);
+    draw_text(hdc, "Drag out anytime \u{00b7} click to open", dx, my + 13, colw, 16, "Segoe UI", 11, 400, cr(142, 142, 147), DT_CENTER);
+}
+
+const TAG_COLORS: [u32; 5] = [cr(255, 69, 58), cr(10, 132, 255), cr(255, 159, 10), cr(191, 90, 242), cr(48, 209, 88)];
+
+unsafe fn paint_todo(hdc: HDC, w: i32, _h: i32) {
+    let a = app();
+    let aside_w = 84;
+    let lx = 48;
+    let lw = w - 48 - aside_w - 14 - 14;
+    let editing_box = !a.edit_hwnd.is_null() && IsWindowVisible(a.edit_hwnd) != 0;
+    let max_rows = if editing_box { 2 } else { 3 };
+    let n = a.store.tasks.len().min(max_rows) as i32;
+    let more = a.store.tasks.len() as i32 - n;
+    let rows_h = n.max(1) * 34 + if editing_box { 34 } else { 0 } + if more > 0 { 16 } else { 0 };
+    let mut y = PMID - (22 + rows_h) / 2;
+    draw_text(hdc, "To-do", lx, y, lw, 20, "Segoe UI", 15, 700, WHITE, DT_LEFT);
+    y += 24;
+    if a.store.tasks.is_empty() && !editing_box {
+        draw_text(hdc, "No tasks yet", lx, y, lw, 29, "Segoe UI", 13, 400, cr(99, 99, 108), DT_LEFT);
+    }
+    for (i, t) in a.store.tasks.iter().take(max_rows).enumerate() {
+        fill_round(hdc, lx, y, lw, 29, 18, cr(28, 28, 30));
+        // round check box
+        let (ccx, ccy) = (lx + 18, y + 15);
+        if t.done {
+            fill_circle(hdc, ccx, ccy, 8, cr(48, 209, 88));
+            fill_circle(hdc, ccx, ccy, 6, cr(28, 28, 30));
+            fill_circle(hdc, ccx, ccy, 4, cr(48, 209, 88));
+        } else {
+            fill_circle(hdc, ccx, ccy, 8, cr(99, 99, 102));
+            fill_circle(hdc, ccx, ccy, 6, cr(28, 28, 30));
+        }
+        let col = if t.done { cr(142, 142, 147) } else { WHITE };
+        let title = t.title.clone();
+        let tw = text_width(&title, "Segoe UI", 13, 400, hdc).min(lw - 70);
+        draw_text(hdc, &title, lx + 36, y, lw - 70, 29, "Segoe UI", 13, 400, col, DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+        if t.done {
+            fill_rect_c(hdc, lx + 36, y + 15, tw, 1, col);
+        }
+        fill_round(hdc, lx + lw - 13, y + 8, 3, 14, 3, TAG_COLORS[i % TAG_COLORS.len()]);
+        add_action(lx, y, lw - 30, 29, A_TODO_TOGGLE, i as i32);
+        let hov = a.hover.1 == i as i32 && (a.hover.0 == A_TODO_TOGGLE || a.hover.0 == A_TODO_DELETE);
+        if hov {
+            draw_text(hdc, "\u{2715}", lx + lw - 36, y, 18, 29, "Segoe UI", 11, 400, cr(255, 107, 97), DT_CENTER);
+        }
+        add_action(lx + lw - 40, y, 26, 29, A_TODO_DELETE, i as i32);
+        y += 34;
+    }
+    if more > 0 {
+        draw_text(hdc, &format!("+{} more", more), lx, y - 2, lw, 16, "Segoe UI", 11, 400, cr(99, 99, 108), DT_LEFT);
+    }
+    // aside: done count + Add task
+    let ax = w - 48 - aside_w;
+    fill_rect_c(hdc, ax - 14, PMID - 50, 1, 100, cr(58, 58, 60));
+    let done = a.store.tasks.iter().filter(|t| t.done).count();
+    let count = format!("{}/{}", done, a.store.tasks.len());
+    draw_text(hdc, &count, ax, PMID - 46, aside_w, 34, "Segoe UI", 26, 700, WHITE, DT_CENTER);
+    draw_text(hdc, "Done today", ax, PMID - 10, aside_w, 15, "Segoe UI", 11, 400, cr(161, 161, 166), DT_CENTER);
+    let bw = text_width("Add task", "Segoe UI", 12, 600, hdc) + 20;
+    pill_btn(hdc, ax + (aside_w - bw) / 2, PMID + 14, "Add task", 12, 600, 10, 24, BLUE, WHITE, A_TODO_ADD, 0);
 }
 
 // ---------- settings ----------
@@ -1006,185 +1352,6 @@ fn set_autostart(on: bool) {
     }
 }
 
-unsafe fn paint_pomo(hdc: HDC, w: i32, _h: i32) {
-    let a = app();
-    // glowing red disc with stopwatch glyph
-    fill_circle(hdc, 104, 118, 60, cr(58, 13, 11));
-    fill_circle(hdc, 104, 118, 55, cr(214, 32, 39));
-    fill_circle(hdc, 104, 118, 48, cr(232, 37, 27));
-    draw_text(hdc, "\u{e916}", 104 - 30, 118 - 30, 60, 60, "Segoe MDL2 Assets", 38, 400, WHITE, DT_CENTER);
-    // time + reset
-    let t = fmt_mmss(a.pomo_left as f64);
-    let tw = text_width(&t, "Segoe UI", 40, 750, hdc);
-    let start_x = 240 + (w - 280 - tw - 34) / 2;
-    draw_text(hdc, &t, start_x, 52, tw + 6, 50, "Segoe UI", 40, 750, WHITE, DT_LEFT);
-    draw_text(hdc, "\u{e777}", start_x + tw + 8, 62, 28, 34, "Segoe MDL2 Assets", 18, 400, cr(215, 215, 222), DT_CENTER);
-    add_action(start_x + tw + 4, 58, 34, 40, A_POMO_RESET, 0);
-    let label = a.pomo_label.clone();
-    draw_text(hdc, &label, 240, 106, w - 280, 22, "Segoe UI", 14, 400, DIM, DT_CENTER);
-    // actions row
-    let y = 140;
-    let (short_on, focus_on) = (a.pomo_mode != 0, a.pomo_mode == 0);
-    fill_round(hdc, 196, y, 110, 34, 34, if short_on { cr(58, 58, 65) } else { CARD2 });
-    draw_text(hdc, "Short Break", 196, y, 110, 34, "Segoe UI", 13, 500, cr(232, 232, 236), DT_CENTER);
-    add_action(196, y, 110, 34, A_POMO_MODE, 5);
-    fill_round(hdc, 314, y, 64, 34, 34, RED);
-    draw_text(hdc, if a.pomo_running { "\u{e769}" } else { "\u{e768}" }, 314, y, 64, 34, "Segoe MDL2 Assets", 15, 400, WHITE, DT_CENTER);
-    add_action(314, y, 64, 34, A_POMO_PLAY, 0);
-    fill_round(hdc, 386, y, 110, 34, 34, if focus_on { cr(58, 58, 65) } else { CARD2 });
-    draw_text(hdc, "Focus Time", 386, y, 110, 34, "Segoe UI", 13, 500, cr(232, 232, 236), DT_CENTER);
-    add_action(386, y, 110, 34, A_POMO_MODE, 25);
-}
-
-unsafe fn paint_water(hdc: HDC, w: i32, _h: i32) {
-    let a = app();
-    let ml = a.store.water_ml;
-    let goal = a.store.water_goal.max(1);
-    let pct = ((ml as f64 / goal as f64) * 100.0).round().min(100.0) as i32;
-    let amt = format!("{:.1}", ml as f64 / 1000.0);
-    let aw = text_width(&amt, "Segoe UI", 36, 750, hdc);
-    draw_text(hdc, &amt, 40, 46, aw + 6, 46, "Segoe UI", 36, 750, WHITE, DT_LEFT);
-    let goal_s = format!("/ {} L", (goal as f64 / 1000.0).to_string());
-    draw_text(hdc, &goal_s, 46 + aw, 58, 80, 32, "Segoe UI", 16, 400, DIM, DT_LEFT);
-    fill_round(hdc, 40, 100, 290, 6, 6, CARD2);
-    if pct > 0 {
-        fill_round(hdc, 40, 100, (290.0 * pct as f64 / 100.0) as i32, 6, 6, BLUE);
-    }
-    let sub = format!("Today · {}% · Reminders {}", pct, if a.store.reminders { "on" } else { "off" });
-    draw_text(hdc, &sub, 40, 112, 290, 20, "Segoe UI", 12, 400, DIM, DT_LEFT);
-    // Drink button with droplet
-    fill_round(hdc, 40, 140, 104, 34, 34, CARD2);
-    let pts = [
-        POINT { x: 58, y: 148 },
-        POINT { x: 50, y: 162 },
-        POINT { x: 53, y: 168 },
-        POINT { x: 63, y: 168 },
-        POINT { x: 66, y: 162 },
-    ];
-    let brush = CreateSolidBrush(CYAN);
-    let pen = CreatePen(PS_NULL as i32, 0, 0);
-    let ob = SelectObject(hdc, brush as HGDIOBJ);
-    let op = SelectObject(hdc, pen as HGDIOBJ);
-    Polygon(hdc, pts.as_ptr(), pts.len() as i32);
-    SelectObject(hdc, ob);
-    SelectObject(hdc, op);
-    DeleteObject(brush as HGDIOBJ);
-    DeleteObject(pen as HGDIOBJ);
-    draw_text(hdc, "Drink", 70, 140, 64, 34, "Segoe UI", 13, 600, cr(124, 196, 255), DT_LEFT);
-    add_action(40, 140, 104, 34, A_DRINK, 0);
-    fill_round(hdc, 152, 140, 118, 34, 34, CARD2);
-    draw_text(hdc, "\u{e713}", 162, 140, 24, 34, "Segoe MDL2 Assets", 13, 400, WHITE, DT_CENTER);
-    draw_text(hdc, "Settings", 186, 140, 78, 34, "Segoe UI", 13, 500, WHITE, DT_LEFT);
-    add_action(152, 140, 118, 34, A_WATER_BELL, 0);
-    // gauge
-    let (cx, cy, r) = (w - 112, 116, 50);
-    draw_arc(hdc, cx, cy, r, 135.0, 270.0, 9, CARD2);
-    if pct > 0 {
-        draw_arc(hdc, cx, cy, r, 135.0, 270.0 * pct as f64 / 100.0, 9, BLUE);
-    }
-    let ptxt = format!("{}", pct);
-    draw_text(hdc, &ptxt, cx - 30, cy - 26, 60, 36, "Segoe UI", 30, 750, WHITE, DT_CENTER);
-    draw_text(hdc, "%", cx - 30, cy + 12, 60, 18, "Segoe UI", 12, 400, DIM, DT_CENTER);
-}
-
-unsafe fn paint_shelf(hdc: HDC, w: i32, h: i32) {
-    let a = app();
-    if a.shelf_items.is_empty() {
-        let pen = CreatePen(PS_DASH as i32, 1, cr(61, 61, 70));
-        let brush = GetStockObject(NULL_BRUSH as i32);
-        let op = SelectObject(hdc, pen as HGDIOBJ);
-        let ob = SelectObject(hdc, brush as HGDIOBJ);
-        RoundRect(hdc, 40, 50, w - 40, h - 34, 18, 18);
-        SelectObject(hdc, op);
-        SelectObject(hdc, ob);
-        DeleteObject(pen as HGDIOBJ);
-        draw_text(hdc, "\u{e8b5}", 40, 66, w - 80, 34, "Segoe MDL2 Assets", 26, 400, cr(201, 201, 209), DT_CENTER);
-        draw_text(hdc, "Drop files here", 40, 104, w - 80, 24, "Segoe UI", 16, 650, WHITE, DT_CENTER);
-        draw_text(hdc, "Drag out anytime · click to open or copy", 40, 130, w - 80, 20, "Segoe UI", 12, 400, DIM, DT_CENTER);
-        return;
-    }
-    draw_text(hdc, "Drop more files anywhere on the notch", 40, 44, w - 80, 20, "Segoe UI", 12, 400, FAINT, DT_CENTER);
-    let mut y = 70;
-    let mut shown = 0;
-    for (i, item) in a.shelf_items.iter().enumerate() {
-        shown += 1;
-        fill_round(hdc, 44, y, w - 88, 34, 11, CARD);
-        draw_text(hdc, "\u{e8a5}", 54, y, 24, 34, "Segoe MDL2 Assets", 14, 400, DIM, DT_CENTER);
-        draw_text(hdc, &item.name.clone(), 82, y, w - 200, 34, "Segoe UI", 13, 500, WHITE, DT_LEFT);
-        draw_text(hdc, &item.size.clone(), w - 130, y, 62, 34, "Segoe UI", 11, 400, FAINT, DT_RIGHT);
-        draw_text(hdc, "✕", w - 66, y, 20, 34, "Segoe UI", 11, 400, FAINT, DT_CENTER);
-        add_action(44, y, w - 112, 34, A_SHELF_OPEN, i as i32);
-        add_action(w - 68, y, 24, 34, A_SHELF_REMOVE, i as i32);
-        y += 40;
-        if y > h - 50 {
-            break;
-        }
-    }
-    // the notch height is fixed, so say when more files don't fit
-    if shown < a.shelf_items.len() {
-        let more = format!("+{} more", a.shelf_items.len() - shown);
-        draw_text(hdc, &more, 40, h - 50, w - 80, 16, "Segoe UI", 11, 400, FAINT, DT_CENTER);
-    }
-}
-
-unsafe fn paint_todo(hdc: HDC, w: i32, h: i32) {
-    let a = app();
-    let done = a.store.tasks.iter().filter(|t| t.done).count();
-    let count = format!("{}/{}", done, a.store.tasks.len());
-    draw_text(hdc, &count, 40, 48, 120, 52, "Segoe UI", 42, 750, WHITE, DT_LEFT);
-    let cw = text_width(&count, "Segoe UI", 42, 750, hdc);
-    fill_circle(hdc, 52 + cw + 18, 74, 18, CARD2);
-    draw_text(hdc, "\u{e787}", 52 + cw, 56, 36, 36, "Segoe MDL2 Assets", 15, 400, WHITE, DT_CENTER);
-    fill_circle(hdc, 52 + cw + 30, 62, 4, BLUE);
-    draw_text(hdc, "Task Done Today", 40, 104, 170, 20, "Segoe UI", 13, 400, DIM, DT_LEFT);
-    fill_round(hdc, 40, 136, 112, 34, 34, CARD2);
-    draw_text(hdc, "\u{e710}", 50, 136, 22, 34, "Segoe MDL2 Assets", 12, 400, WHITE, DT_CENTER);
-    draw_text(hdc, "Add Task", 72, 136, 76, 34, "Segoe UI", 13, 500, WHITE, DT_LEFT);
-    add_action(40, 136, 112, 34, A_TODO_ADD, 0);
-    fill_round(hdc, 160, 136, 112, 34, 34, CARD2);
-    draw_text(hdc, "\u{e70f}", 170, 136, 22, 34, "Segoe MDL2 Assets", 12, 400, WHITE, DT_CENTER);
-    draw_text(hdc, "Edit Task", 192, 136, 76, 34, "Segoe UI", 13, 500, WHITE, DT_LEFT);
-    add_action(160, 136, 112, 34, A_TODO_EDIT, 0);
-    // right panel
-    let px = 292;
-    let pw = w - px - 40;
-    fill_round(hdc, px, 50, pw, h - 84, 18, cr(27, 27, 30));
-    if a.store.tasks.is_empty() {
-        draw_text(hdc, "\u{e8fd}", px, 76, pw, 34, "Segoe MDL2 Assets", 26, 400, cr(85, 85, 95), DT_CENTER);
-        draw_text(hdc, "No tasks.", px, 116, pw, 22, "Segoe UI", 13, 400, DIM, DT_CENTER);
-        return;
-    }
-    let mut y = 60;
-    // while the inline editor is open it covers the bottom of the panel
-    let editing_box = !a.edit_hwnd.is_null() && IsWindowVisible(a.edit_hwnd) != 0;
-    let y_limit = if editing_box { h - 120 } else { h - 76 };
-    for (i, t) in a.store.tasks.iter().enumerate() {
-        if y > y_limit {
-            break;
-        }
-        fill_round(hdc, px + 10, y, pw - 20, 34, 11, if t.done { cr(30, 58, 36) } else { CARD2 });
-        if t.done {
-            draw_text(hdc, "\u{e73e}", px + 16, y, 22, 34, "Segoe MDL2 Assets", 12, 400, GREEN, DT_CENTER);
-        } else {
-            let pen = CreatePen(PS_SOLID as i32, 1, cr(90, 90, 100));
-            let brush = GetStockObject(NULL_BRUSH as i32);
-            let op = SelectObject(hdc, pen as HGDIOBJ);
-            let ob = SelectObject(hdc, brush as HGDIOBJ);
-            RoundRect(hdc, px + 19, y + 8, px + 35, y + 24, 5, 5);
-            SelectObject(hdc, op);
-            SelectObject(hdc, ob);
-            DeleteObject(pen as HGDIOBJ);
-        }
-        draw_text(hdc, &t.title.clone(), px + 44, y, pw - 90, 34, "Segoe UI", 13, 500, if t.done { DIM } else { WHITE }, DT_LEFT);
-        add_action(px + 10, y, pw - 20, 34, A_TODO_TOGGLE, i as i32);
-        if a.editing {
-            draw_text(hdc, "✕", px + pw - 36, y, 20, 34, "Segoe UI", 11, 400, cr(255, 107, 97), DT_CENTER);
-            add_action(px + pw - 38, y, 24, 34, A_TODO_DELETE, i as i32);
-        }
-        y += 40;
-    }
-}
-
 // ---------- actions ----------
 unsafe fn hide_edit() {
     let a = app();
@@ -1211,12 +1378,29 @@ fn set_pomo_mode(mode: u8) {
     };
 }
 
+// Next / previous visible page.
+fn step_page(dir: i32) -> usize {
+    let pages = visible_pages();
+    let cur = pages.iter().position(|p| *p == app().page).unwrap_or(0) as i32;
+    pages[(cur + dir).rem_euclid(pages.len() as i32) as usize]
+}
+
 unsafe fn goto_page(hwnd: HWND, page: usize) {
     let a = app();
     a.page = page % PAGES;
-    a.lyrics_open = false;
-    // the inline todo editor belongs to the todo page only
-    if a.page != 4 {
+    a.hover = (0, -1);
+    if a.page == 1 {
+        let m = media::snapshot();
+        if m.present && !m.title.is_empty() {
+            if matches!(lyrics::state(), lyrics::LyricsState::NotAvailable) {
+                lyrics::refetch(&m.title, &m.artist, m.duration_secs);
+            } else {
+                lyrics::ensure_fetched(&m.title, &m.artist, m.duration_secs);
+            }
+        }
+    }
+    // the inline todo editor belongs to the to-do page only
+    if a.page != 5 {
         hide_edit();
     }
     apply_size(hwnd);
@@ -1241,8 +1425,8 @@ fn vol_set_from_x(x: i32) {
 unsafe fn do_action(code: i32, param: i32, x: i32, _y: i32, hwnd: HWND) {
     let a = app();
     match code {
-        A_PREV_PAGE => goto_page(hwnd, (a.page + PAGES - 1) % PAGES),
-        A_NEXT_PAGE => goto_page(hwnd, (a.page + 1) % PAGES),
+        A_PREV_PAGE => goto_page(hwnd, step_page(-1)),
+        A_NEXT_PAGE => goto_page(hwnd, step_page(1)),
         A_DOT => goto_page(hwnd, param as usize),
         A_SETTINGS => open_settings(),
         A_SET_SCALE => {
@@ -1270,6 +1454,7 @@ unsafe fn do_action(code: i32, param: i32, x: i32, _y: i32, hwnd: HWND) {
         }
         A_WATER_RESET => {
             a.store.water_ml = 0;
+            a.store.water_log.clear();
             a.reset_flash_until = GetTickCount64() + 1500;
             store::save(&a.store);
         }
@@ -1279,7 +1464,7 @@ unsafe fn do_action(code: i32, param: i32, x: i32, _y: i32, hwnd: HWND) {
             place_window(hwnd, a.cur_px.0, a.cur_px.1);
         }
         A_MINIMAL => {
-            a.store.minimal = !a.store.minimal;
+            a.store.tiny_tab = !a.store.tiny_tab;
             store::save(&a.store);
             apply_size(hwnd);
         }
@@ -1298,8 +1483,8 @@ unsafe fn do_action(code: i32, param: i32, x: i32, _y: i32, hwnd: HWND) {
         }
         A_SHOW_LYRICS => {
             a.store.show_lyrics = !a.store.show_lyrics;
-            if !a.store.show_lyrics {
-                a.lyrics_open = false;
+            if !a.store.show_lyrics && a.page == 1 {
+                a.page = 0;
             }
             store::save(&a.store);
         }
@@ -1362,23 +1547,12 @@ unsafe fn do_action(code: i32, param: i32, x: i32, _y: i32, hwnd: HWND) {
         A_SEEK => {
             let m = media::snapshot();
             if m.duration_secs > 0.0 {
-                let (bx, bw) = (88, expanded_size().0 - 176);
+                let (bx, bw) = a.seek_bar;
                 let frac = ((x - bx) as f64 / bw as f64).clamp(0.0, 1.0);
                 media::seek(frac * m.duration_secs);
             }
         }
-        A_LYRICS => {
-            a.lyrics_open = !a.lyrics_open;
-            if a.lyrics_open {
-                let m = media::snapshot();
-                if matches!(lyrics::state(), lyrics::LyricsState::NotAvailable) {
-                    lyrics::refetch(&m.title, &m.artist, m.duration_secs);
-                } else {
-                    lyrics::ensure_fetched(&m.title, &m.artist, m.duration_secs);
-                }
-            }
-            apply_size(hwnd);
-        }
+        A_LYRICS => goto_page(hwnd, 1),
         A_VOL_MUTE => {
             media::volume_toggle_mute();
             if let Some((lvl, muted)) = media::volume_get() {
@@ -1398,7 +1572,16 @@ unsafe fn do_action(code: i32, param: i32, x: i32, _y: i32, hwnd: HWND) {
         A_POMO_MODE => set_pomo_mode(if param == 5 { 1 } else { 0 }),
         A_DRINK => {
             if a.store.water_ml < a.store.water_goal {
+                let before = a.store.water_ml;
                 a.store.water_ml = (a.store.water_ml + a.store.drink_ml).min(a.store.water_goal);
+                let mut t: SYSTEMTIME = std::mem::zeroed();
+                GetLocalTime(&mut t);
+                let hr = t.wHour as i32;
+                let added = a.store.water_ml - before;
+                match a.store.water_log.last_mut() {
+                    Some(e) if e.0 == hr => e.1 += added,
+                    _ => a.store.water_log.push((hr, added)),
+                }
                 store::save(&a.store);
             }
         }
@@ -1453,14 +1636,18 @@ unsafe fn do_action(code: i32, param: i32, x: i32, _y: i32, hwnd: HWND) {
 // ---------- todo inline edit ----------
 unsafe fn show_edit(hwnd: HWND) {
     let a = app();
-    if a.page != 4 {
-        a.page = 4;
+    if a.page != 5 {
+        a.page = 5;
         apply_size(hwnd);
     }
     let (dw, dh) = expanded_size();
-    let (pw, ph) = cur_size();
-    // place the edit inside the right panel, bottom area (design -> physical)
-    SetWindowPos(a.edit_hwnd, null_mut(), 302 * pw / dw, (dh - 78) * ph / dh, (dw - 352) * pw / dw, 34 * ph / dh, SWP_NOZORDER | SWP_SHOWWINDOW);
+    let (pw, ph) = px_of((dw, dh), expanded_scale());
+    // under the visible tasks, in the list column (design -> physical)
+    let n = a.store.tasks.len().min(2) as i32;
+    let rows_h = n.max(1) * 34 + 34;
+    let top = 121 - (22 + rows_h) / 2 + 24 + n * 34;
+    let lw = dw - 48 - 84 - 28;
+    SetWindowPos(a.edit_hwnd, null_mut(), 48 * pw / dw, top * ph / dh, lw * pw / dw, 28 * ph / dh, SWP_NOZORDER | SWP_SHOWWINDOW);
     SetWindowTextW(a.edit_hwnd, wide("").as_ptr());
     ShowWindow(a.edit_hwnd, SW_SHOW);
     SetFocus(a.edit_hwnd);
@@ -1521,8 +1708,8 @@ unsafe fn collapse(hwnd: HWND) {
     let edit_visible = !a.edit_hwnd.is_null() && IsWindowVisible(a.edit_hwnd) != 0;
     if a.expanded && !edit_visible && !a.vol_drag {
         a.expanded = false;
-        a.lyrics_open = false;
         a.dots_hover = false;
+        a.hover = (0, -1);
         apply_size(hwnd);
     }
 }
@@ -1607,24 +1794,6 @@ unsafe fn open_settings() {
     ShowWindow(hwnd, SW_SHOW);
     SetForegroundWindow(hwnd);
     InvalidateRect(a.hwnd, null(), 0);
-}
-
-unsafe fn draw_droplet(hdc: HDC, dx: i32, dy: i32, col: u32) {
-    fill_circle(hdc, dx, dy + 2, 5, col);
-    let pts = [
-        POINT { x: dx, y: dy - 7 },
-        POINT { x: dx - 4, y: dy - 1 },
-        POINT { x: dx + 4, y: dy - 1 },
-    ];
-    let brush = CreateSolidBrush(col);
-    let pen = CreatePen(PS_NULL as i32, 0, 0);
-    let ob = SelectObject(hdc, brush as HGDIOBJ);
-    let op = SelectObject(hdc, pen as HGDIOBJ);
-    Polygon(hdc, pts.as_ptr(), pts.len() as i32);
-    SelectObject(hdc, ob);
-    SelectObject(hdc, op);
-    DeleteObject(brush as HGDIOBJ);
-    DeleteObject(pen as HGDIOBJ);
 }
 
 // Section label above a card ("Startup", "Notch" ...).
@@ -1885,7 +2054,7 @@ unsafe fn paint_settings_window(hdc: HDC, w: i32, h: i32) {
             }
             let ry = y + 92;
             fill_rect_c(hdc, x0 + 14, ry, cw - 14, 1, S_LINE);
-            s_row(hdc, x0, cw, ry, 52, &row("Minimal notch", "A tiny tab when nothing is playing (off shows the time)", RowKind::Switch(st.minimal, A_MINIMAL, true)));
+            s_row(hdc, x0, cw, ry, 52, &row("Minimal notch", "A tiny tab instead of the clock when nothing is playing", RowKind::Switch(st.tiny_tab, A_MINIMAL, true)));
             y += card_h;
             s_h2(hdc, x0, cw, &mut y, "Sounds");
             s_group(hdc, x0, cw, &mut y, &[row("Reminder sounds", "Chimes for Pomodoro and Water", RowKind::Switch(st.sounds, A_SOUNDS, true))]);
@@ -1916,8 +2085,8 @@ unsafe fn paint_settings_window(hdc: HDC, w: i32, h: i32) {
             s_group(hdc, x0, cw, &mut y, &[row("Show lyrics", "From LRCLIB, a community-contributed lyrics database", RowKind::Switch(st.show_lyrics, A_SHOW_LYRICS, true))]);
             s_h2(hdc, x0, cw, &mut y, "Minimized notch");
             s_group(hdc, x0, cw, &mut y, &[
-                row("Mini player", "Album art and a sound wave while music plays", RowKind::Switch(st.mini_player, A_MINI_PLAYER, true)),
-                row("Lyrics in the mini player", "The current line instead of the song name", RowKind::Switch(st.mini_lyrics, A_MINI_LYRICS, st.mini_player && st.show_lyrics)),
+                row("Music in the minimized notch", "A sound wave next to the clock while music plays", RowKind::Switch(st.mini_player, A_MINI_PLAYER, true)),
+                row("Lyrics in the minimized notch", "The current line instead of the clock (always shown when closed on Lyrics)", RowKind::Switch(st.mini_lyrics, A_MINI_LYRICS, st.mini_player && st.show_lyrics)),
             ]);
         }
         4 => {
@@ -2123,7 +2292,10 @@ unsafe fn render_scaled(ref_dc: HDC, dst: HDC, dx: i32, dy: i32, pw: i32, ph: i3
         eDy: 0.0,
     };
     SetWorldTransform(mem, &xform);
+    let prev_k = app().paint_k;
+    app().paint_k = (xform.eM11, xform.eM22);
     painter(mem);
+    app().paint_k = prev_k;
     // Reset to identity BEFORE StretchBlt: a transform left active on the
     // source DC can be applied to the source rectangle too.
     ModifyWorldTransform(mem, null(), MWT_IDENTITY);
@@ -2143,7 +2315,7 @@ unsafe fn blend_frame(ref_dc: HDC, back: HDC, pw: i32, ph: i32, expanded: bool, 
         return;
     }
     let (dw, dh) = if expanded { expanded_size() } else { collapsed_size() };
-    let (fw, fh) = if expanded { px_of((dw, dh), expanded_scale()) } else { px_of((dw, dh), COLLAPSED_SCALE) };
+    let (fw, fh) = px_of((dw, dh), expanded_scale());
     let fd = CreateCompatibleDC(ref_dc);
     let fb = CreateCompatibleBitmap(ref_dc, fw, fh);
     let old = SelectObject(fd, fb as HGDIOBJ);
@@ -2258,13 +2430,25 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 a.dots_hover = over;
                 InvalidateRect(hwnd, null(), 0);
             }
+            // hover looks (buttons, rows, the volume slider)
+            let mut hov = (0, -1);
+            for (r, code, param) in &a.actions {
+                if x >= r.left && x < r.right && y >= r.top && y < r.bottom {
+                    hov = (*code, *param);
+                }
+            }
+            if hov != a.hover {
+                a.hover = hov;
+                InvalidateRect(hwnd, null(), 0);
+            }
             0
         }
         WM_MOUSELEAVE_MSG => {
             let a = app();
             a.tracking = false;
-            if a.dots_hover {
+            if a.dots_hover || a.hover.0 != 0 {
                 a.dots_hover = false;
+                a.hover = (0, -1);
                 InvalidateRect(hwnd, null(), 0);
             }
             // while dragging with the mouse captured, collapse happens on release
@@ -2349,9 +2533,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             a.shelf_items = build_shelf_items(&a.store);
             store::save(&a.store);
             DragFinish(hdrop);
-            if a.page != 3 {
-                a.page = 3;
-            }
+            a.page = 4;
             a.expanded = true;
             apply_size(hwnd);
             0
@@ -2373,9 +2555,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             };
             ScreenToClient(hwnd, &mut p);
             let (x, y) = client_to_design(hwnd, p.x, p.y);
-            if msg == WM_MOUSEWHEEL && a.page == 0 && !a.lyrics_open && media::snapshot().present {
-                let (bx, bw) = vol_bar_geom();
-                if y >= 168 && y < 208 && x >= bx - 16 && x < bx + bw + 16 {
+            if msg == WM_MOUSEWHEEL && a.page == 0 && media::snapshot().present {
+                let (bx, _) = vol_bar_geom();
+                if y >= 133 && y < 161 && x >= bx - 8 && x < expanded_size().0 - 48 {
                     if let Some((lvl, _)) = media::volume_get() {
                         let next = (lvl + delta as f32 / 120.0 * 0.05).clamp(0.0, 1.0);
                         media::volume_set(next);
@@ -2404,7 +2586,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 a.wheel_acc = 0;
                 if now.saturating_sub(a.last_page_tick) >= 350 {
                     a.last_page_tick = now;
-                    goto_page(hwnd, (a.page as i32 + dir).rem_euclid(PAGES as i32) as usize);
+                    goto_page(hwnd, step_page(dir));
                     InvalidateRect(hwnd, null(), 0);
                 }
             }
@@ -2469,8 +2651,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     let every_ms = ((until - from) as u64 * 3_600_000 / drinks).max(15 * 60_000);
                     if now.saturating_sub(a.last_water_tick) >= every_ms && !a.expanded {
                         a.last_water_tick = now;
-                        a.page = 2;
-                        a.lyrics_open = false;
+                        a.page = 3;
                         a.expanded = true;
                         a.popup_until = now + 6000;
                         if a.store.sounds {
@@ -2491,11 +2672,23 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     collapse(hwnd);
                 }
             }
+            // "Charging" popup when the charger is plugged in
+            if let Some((_, plugged)) = battery() {
+                let ac = plugged as i8;
+                if a.last_ac == 0 && ac == 1 && !a.expanded {
+                    a.alert_until = now + 3800;
+                }
+                a.last_ac = ac;
+            }
+            if a.alert_until > 0 && (now >= a.alert_until || a.expanded) {
+                a.alert_until = 0;
+            }
             // water day rollover
             let today = today_string();
             if a.store.water_date != today {
                 a.store.water_date = today;
                 a.store.water_ml = 0;
+                a.store.water_log.clear();
                 store::save(&a.store);
             }
             if a.page == 0 && !a.vol_drag {
@@ -2514,7 +2707,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if !a.expanded && !a.animating && cur_size() != a.cur_px {
                 apply_size(hwnd);
             }
-            let want_wave = !a.expanded && mini_active();
+            let want_wave = (!a.expanded && mini_active()) || (a.expanded && a.page == 1);
             if want_wave != a.wave_on {
                 a.wave_on = want_wave;
                 if want_wave {
@@ -2551,6 +2744,7 @@ fn main() {
         if st.water_date != today {
             st.water_date = today;
             st.water_ml = 0;
+            st.water_log.clear();
         }
         if st.empty_shelf && !st.shelf.is_empty() {
             st.shelf.clear();
@@ -2561,7 +2755,11 @@ fn main() {
             hwnd: null_mut(),
             expanded: false,
             page: 0,
-            lyrics_open: false,
+            hover: (0, -1),
+            seek_bar: (0, 1),
+            paint_k: (1.0, 1.0),
+            alert_until: 0,
+            last_ac: -1,
             autostart: false,
             settings_hwnd: null_mut(),
             settings_section: 0,
@@ -2643,7 +2841,7 @@ fn main() {
             class_name.as_ptr(),
             wide("Isle").as_ptr(),
             WS_POPUP,
-            mon.left + (mon.right - mon.left - w) / 2, mon.top, w, h,
+            mon.left + (mon.right - mon.left - w) / 2, mon.top + top_gap(), w, h,
             null_mut(), null_mut(), hinstance, null(),
         );
         if hwnd.is_null() {

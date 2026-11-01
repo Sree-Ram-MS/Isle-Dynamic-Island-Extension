@@ -32,8 +32,10 @@ pub struct Store {
     /// Display the notch sits on (index in monitor enumeration order);
     /// -1 = the main display.
     pub monitor: i32,
-    /// Idle look: the tiny tab (true) or a small pill with the time (false).
-    pub minimal: bool,
+    /// Idle look: a tiny tab (true) instead of the clock pill (false).
+    pub tiny_tab: bool,
+    /// Today's drinks by hour: (hour, ml).
+    pub water_log: Vec<(i32, i32)>,
     /// Open the notch on click instead of on hover.
     pub open_click: bool,
     /// Swap the page dots for page icons on hover.
@@ -72,7 +74,6 @@ pub fn load() -> Store {
     st.mini_player = true;
     st.mini_lyrics = true;
     st.monitor = -1;
-    st.minimal = true;
     st.page_icons = true;
     st.show_lyrics = true;
     st.pomo_focus = 25;
@@ -99,7 +100,16 @@ pub fn load() -> Store {
                     "mini_lyrics" => st.mini_lyrics = v != "0",
                     "reminders" => st.reminders = v != "0",
                     "monitor" => st.monitor = v.parse().unwrap_or(-1),
-                    "minimal" => st.minimal = v != "0",
+                    "tiny_tab" => st.tiny_tab = v != "0",
+                    "water_log" => {
+                        for part in v.split(',') {
+                            if let Some((h, m)) = part.split_once(':') {
+                                if let (Ok(h), Ok(m)) = (h.trim().parse(), m.trim().parse()) {
+                                    st.water_log.push((h, m));
+                                }
+                            }
+                        }
+                    }
                     "open_click" => st.open_click = v != "0",
                     "page_icons" => st.page_icons = v != "0",
                     "anim_fast" => st.anim_fast = v != "0",
@@ -147,11 +157,13 @@ pub fn save(st: &Store) {
     out.push_str(&format!("mini_lyrics={}\n", if st.mini_lyrics { 1 } else { 0 }));
     out.push_str(&format!("reminders={}\n", if st.reminders { 1 } else { 0 }));
     let b = |x: bool| if x { 1 } else { 0 };
-    out.push_str(&format!("monitor={}\nminimal={}\nopen_click={}\npage_icons={}\nanim_fast={}\nshow_lyrics={}\n",
-        st.monitor, b(st.minimal), b(st.open_click), b(st.page_icons), b(st.anim_fast), b(st.show_lyrics)));
+    out.push_str(&format!("monitor={}\ntiny_tab={}\nopen_click={}\npage_icons={}\nanim_fast={}\nshow_lyrics={}\n",
+        st.monitor, b(st.tiny_tab), b(st.open_click), b(st.page_icons), b(st.anim_fast), b(st.show_lyrics)));
     out.push_str(&format!("pomo_focus={}\npomo_short={}\npomo_long={}\n", st.pomo_focus, st.pomo_short, st.pomo_long));
     out.push_str(&format!("water_goal={}\ndrink_ml={}\nactive_from={}\nactive_until={}\nempty_shelf={}\n",
         st.water_goal, st.drink_ml, st.active_from, st.active_until, b(st.empty_shelf)));
+    let log: Vec<String> = st.water_log.iter().map(|(h, m)| format!("{}:{}", h, m)).collect();
+    out.push_str(&format!("water_log={}\n", log.join(",")));
     for t in &st.tasks {
         out.push_str(&format!("todo={}|{}\n", t.title.replace(['\n', '\r', '|'], " "), if t.done { 1 } else { 0 }));
     }

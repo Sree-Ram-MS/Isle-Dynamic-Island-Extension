@@ -4,7 +4,7 @@ A native Windows clone of the Nusa living notch, written in pure Rust on
 Win32/WinRT — no Electron, no WebView, no Chromium. Built for the lowest
 possible RAM and a tiny single-file `.exe` (~380 KB).
 
-Current version: **0.4.0**
+Current version: **0.5.0**
 
 **Lowest possible RAM is a hard requirement:**
 - One process, one UI thread; media polled on one background thread
@@ -66,3 +66,11 @@ first run: More info → Run anyway.)
 - `src/store.rs` — plain-text persistence
 - `design/notch-design.html`, `design/settings-design.html` — the approved HTML design prototypes
   (design reference only; the shipped app is native)
+
+## v0.5.0: new notch design
+
+The notch now follows the "Nusa Notch" design (`design/notch-design.html`):
+
+- Minimized: a floating black pill with a battery ring (green dot on PCs without a battery) and the time. While music plays it widens with a red sound wave; while the Pomodoro runs it shows an orange timer ring; when closed on the Lyrics page (or with "Lyrics in the minimized notch" on) it shows the live lyric line. Plugging in the charger pops a "Charging" card.
+- Opened: a 560 x 232 rounded card with the page name in its colour, the clock and date in the header, round chevrons and page dots with a gear (Settings) at the bottom. Hovering the dots shows page icons.
+- Six pages: Music, Lyrics, Focus timer, Water (with today's drinks by hour), Shelf (files next to a drop zone) and To-do (round check boxes, done count, Add task).

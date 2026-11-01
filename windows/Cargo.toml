@@ -1,6 +1,6 @@
 [package]
 name = "isle"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "Isle - a living notch for Windows, native Rust (no web engine)"
 license = "MIT"
@@ -25,6 +25,7 @@ windows-sys = { version = "0.59", features = [
   "Win32_System_LibraryLoader",
   "Win32_System_SystemInformation",
   "Win32_System_Registry",
+  "Win32_System_Power",
   "Win32_System_Diagnostics_Debug",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_Networking_WinHttp",
