@@ -1,4 +1,4 @@
-// Isle for Windows — native Rust v0.3.0
+// Isle for Windows — native Rust v0.4.0
 // The full app on the spike's skeleton: one top-edge window, one UI thread,
 // GDI drawing (double-buffered), real functionality per page:
 //   Music    — WinRT GSMTC (media.rs) + LRCLIB synced lyrics split-pane
@@ -109,18 +109,39 @@ const S_SECTION: i32 = 101;
 
 const REPO_URL: &str = "https://github.com/Sree-Ram-MS/Isle-Dynamic-Island-Extension";
 
-// Settings window, in design units (96-dpi pixels).
-const SET_W: i32 = 760;
-const SET_H: i32 = 540;
-const SIDEBAR_W: i32 = 236;
+const A_MONITOR: i32 = 70;
+const A_MINIMAL: i32 = 71;
+const A_OPEN_MODE: i32 = 72;
+const A_PAGE_ICONS: i32 = 73;
+const A_ANIM: i32 = 74;
+const A_SHOW_LYRICS: i32 = 75;
+const A_POMO_FOCUS: i32 = 76;
+const A_POMO_SHORT: i32 = 77;
+const A_POMO_LONG: i32 = 78;
+const A_WATER_GOAL: i32 = 79;
+const A_DRINK_ML: i32 = 80;
+const A_ACTIVE_FROM: i32 = 81;
+const A_ACTIVE_UNTIL: i32 = 82;
+const A_EMPTY_SHELF: i32 = 83;
+const A_OPEN_LRCLIB: i32 = 84;
+const S_MINIMIZE: i32 = 102;
+
+// Settings window (Nusa Settings design), in design units (96-dpi pixels).
+const SET_W: i32 = 820;
+const SET_H: i32 = 640;
+const SIDEBAR_W: i32 = 228;
 // (name, icon glyph, tile colour); Water's droplet is drawn by hand.
-const SECTIONS: [(&str, &str, u32); 6] = [
+// About is pinned to the bottom of the sidebar.
+const SECTIONS: [(&str, &str, u32); 9] = [
     ("General", "\u{e713}", cr(142, 142, 147)),
+    ("Display", "\u{e7f4}", cr(94, 92, 230)),
+    ("Appearance", "\u{e790}", cr(58, 58, 60)),
     ("Music and lyrics", "\u{e8d6}", cr(255, 55, 95)),
+    ("To-do", "\u{e73e}", cr(48, 209, 88)),
+    ("Pomodoro", "\u{e916}", cr(255, 159, 10)),
     ("Water", "", cr(10, 132, 255)),
-    ("Shelf", "\u{e8b5}", cr(255, 179, 0)),
-    ("To-do", "\u{e73e}", cr(52, 199, 89)),
-    ("About", "\u{e946}", cr(99, 99, 108)),
+    ("Shelf", "\u{e7b8}", cr(255, 176, 0)),
+    ("About", "\u{e946}", cr(99, 99, 102)),
 ];
 
 const PAGES: usize = 5; // 0 Music, 1 Pomodoro, 2 Water, 3 Shelf, 4 Todo
@@ -178,6 +199,14 @@ struct App {
     pomo_left: u32,
     pomo_running: bool,
     pomo_label: String,
+    pomo_mode: u8, // 0 focus, 1 short break, 2 long break
+    pomo_count: u32, // focus sessions finished (every 4th break is long)
+    // water reminders / popups
+    last_water_tick: u64,
+    popup_until: u64,
+    // settings window extras
+    settings_hover: i32,
+    reset_flash_until: u64,
     // volume
     vol_level: f32,
     vol_muted: bool,
@@ -393,8 +422,10 @@ fn collapsed_size() -> (i32, i32) {
     // pill: album art, the live lyric line and a sound wave.
     if mini_active() {
         (340, 34)
-    } else {
+    } else if app().store.minimal {
         (120, 16)
+    } else {
+        (190, 26) // a small pill with the time
     }
 }
 
@@ -451,7 +482,7 @@ fn cur_size() -> (i32, i32) {
 // Corner radius (px) of the minimized look for the current state.
 fn collapsed_radius() -> i32 {
     let (_, h) = px_of(collapsed_size(), COLLAPSED_SCALE);
-    if mini_active() { h } else { 16 }
+    if mini_active() || !app().store.minimal { h } else { 16 }
 }
 
 // Top edge stays square (it touches the screen edge); the bottom corners
@@ -479,9 +510,42 @@ fn ease_out_back(t: f32) -> f32 {
     1.0 + c3 * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
 }
 
+// Displays in enumeration order: (screen rect, is main display).
+unsafe extern "system" fn monitor_enum_cb(hmon: HMONITOR, _hdc: HDC, _r: *mut RECT, data: LPARAM) -> i32 {
+    let list = &mut *(data as *mut Vec<(RECT, bool)>);
+    let mut mi: MONITORINFO = std::mem::zeroed();
+    mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+    if GetMonitorInfoW(hmon, &mut mi) != 0 {
+        list.push((mi.rcMonitor, mi.dwFlags & 1 != 0));
+    }
+    1
+}
+
+fn monitors() -> Vec<(RECT, bool)> {
+    let mut list: Vec<(RECT, bool)> = Vec::new();
+    unsafe {
+        EnumDisplayMonitors(null_mut(), null(), Some(monitor_enum_cb), &mut list as *mut _ as LPARAM);
+    }
+    list
+}
+
+// Screen rect of the display chosen in Settings > Display (main display by
+// default, or when the chosen one is unplugged).
+fn notch_monitor() -> RECT {
+    let list = monitors();
+    let want = app().store.monitor;
+    if want >= 0 && (want as usize) < list.len() {
+        return list[want as usize].0;
+    }
+    if let Some((r, _)) = list.iter().find(|(_, main)| *main) {
+        return *r;
+    }
+    unsafe { RECT { left: 0, top: 0, right: GetSystemMetrics(SM_CXSCREEN), bottom: GetSystemMetrics(SM_CYSCREEN) } }
+}
+
 unsafe fn place_window(hwnd: HWND, w: i32, h: i32) {
-    let screen_w = GetSystemMetrics(SM_CXSCREEN);
-    SetWindowPos(hwnd, HWND_TOPMOST, (screen_w - w) / 2, 0, w, h, SWP_NOACTIVATE);
+    let m = notch_monitor();
+    SetWindowPos(hwnd, HWND_TOPMOST, m.left + (m.right - m.left - w) / 2, m.top, w, h, SWP_NOACTIVATE);
 }
 
 // Move the notch towards the size of its current state. Size changes
@@ -503,6 +567,9 @@ unsafe fn apply_size(hwnd: HWND) {
     a.open_to = open_to;
     a.anim_start = GetTickCount64();
     a.anim_dur = if open_to > a.open_from { 260 } else { 190 };
+    if a.store.anim_fast {
+        a.anim_dur = a.anim_dur * 3 / 5;
+    }
     a.animating = true;
     SetTimer(hwnd, TIMER_ANIM, 10, None);
     anim_step(hwnd);
@@ -622,6 +689,12 @@ unsafe fn paint_collapsed(hdc: HDC, w: i32, h: i32) {
         paint_mini(hdc, w, h);
         return;
     }
+    if !app().store.minimal {
+        let (_, time) = clock_strings();
+        fill_circle(hdc, 18, h / 2, 3, GREEN);
+        draw_text(hdc, &time, 0, 0, w, h, "Segoe UI", 13, 650, WHITE, DT_CENTER);
+        return;
+    }
     // Just the tab: black sliver + one small green dot as the cue.
     fill_circle(hdc, w / 2, h / 2 + 1, 3, GREEN);
 }
@@ -647,7 +720,7 @@ fn live_lyric(m: &media::MediaInfo) -> Option<String> {
 // lyric line (or the song) in the middle, a moving sound wave on the right.
 unsafe fn paint_mini(hdc: HDC, w: i32, h: i32) {
     let m = media::snapshot();
-    let lyric = if app().store.mini_lyrics { live_lyric(&m) } else { None };
+    let lyric = if app().store.mini_lyrics && app().store.show_lyrics { live_lyric(&m) } else { None };
     if lyric.is_some() {
         // soft red glow behind the lyric, fading out to the black edges
         let (x0, x1) = (40, w - 46);
@@ -817,7 +890,7 @@ unsafe fn paint_music(hdc: HDC, w: i32, h: i32) {
     }
     add_action(88, 146, w - 176, 22, A_SEEK, 0);
     // bottom row: lyrics btn / controls / volume
-    if m.present {
+    if m.present && app().store.show_lyrics {
         draw_text(hdc, "\u{e8f2}", 38, 176, 30, 26, "Segoe MDL2 Assets", 17, 400, cr(142, 142, 152), DT_CENTER);
         add_action(34, 172, 38, 32, A_LYRICS, 0);
     }
@@ -951,7 +1024,7 @@ unsafe fn paint_pomo(hdc: HDC, w: i32, _h: i32) {
     draw_text(hdc, &label, 240, 106, w - 280, 22, "Segoe UI", 14, 400, DIM, DT_CENTER);
     // actions row
     let y = 140;
-    let (short_on, focus_on) = (a.pomo_total == 300, a.pomo_total == 1500);
+    let (short_on, focus_on) = (a.pomo_mode != 0, a.pomo_mode == 0);
     fill_round(hdc, 196, y, 110, 34, 34, if short_on { cr(58, 58, 65) } else { CARD2 });
     draw_text(hdc, "Short Break", 196, y, 110, 34, "Segoe UI", 13, 500, cr(232, 232, 236), DT_CENTER);
     add_action(196, y, 110, 34, A_POMO_MODE, 5);
@@ -966,11 +1039,13 @@ unsafe fn paint_pomo(hdc: HDC, w: i32, _h: i32) {
 unsafe fn paint_water(hdc: HDC, w: i32, _h: i32) {
     let a = app();
     let ml = a.store.water_ml;
-    let pct = ((ml as f64 / 1500.0) * 100.0).round() as i32;
+    let goal = a.store.water_goal.max(1);
+    let pct = ((ml as f64 / goal as f64) * 100.0).round().min(100.0) as i32;
     let amt = format!("{:.1}", ml as f64 / 1000.0);
     let aw = text_width(&amt, "Segoe UI", 36, 750, hdc);
     draw_text(hdc, &amt, 40, 46, aw + 6, 46, "Segoe UI", 36, 750, WHITE, DT_LEFT);
-    draw_text(hdc, "/ 1.5 L", 46 + aw, 58, 70, 32, "Segoe UI", 16, 400, DIM, DT_LEFT);
+    let goal_s = format!("/ {} L", (goal as f64 / 1000.0).to_string());
+    draw_text(hdc, &goal_s, 46 + aw, 58, 80, 32, "Segoe UI", 16, 400, DIM, DT_LEFT);
     fill_round(hdc, 40, 100, 290, 6, 6, CARD2);
     if pct > 0 {
         fill_round(hdc, 40, 100, (290.0 * pct as f64 / 100.0) as i32, 6, 6, BLUE);
@@ -1118,6 +1193,24 @@ unsafe fn hide_edit() {
     }
 }
 
+fn set_pomo_mode(mode: u8) {
+    let a = app();
+    a.pomo_mode = mode;
+    let mins = match mode {
+        0 => a.store.pomo_focus,
+        1 => a.store.pomo_short,
+        _ => a.store.pomo_long,
+    };
+    a.pomo_total = (mins.max(1) * 60) as u32;
+    a.pomo_left = a.pomo_total;
+    a.pomo_running = false;
+    a.pomo_label = match mode {
+        0 => "Focus time".into(),
+        1 => "Break time".into(),
+        _ => "Long break".into(),
+    };
+}
+
 unsafe fn goto_page(hwnd: HWND, page: usize) {
     let a = app();
     a.page = page % PAGES;
@@ -1177,7 +1270,73 @@ unsafe fn do_action(code: i32, param: i32, x: i32, _y: i32, hwnd: HWND) {
         }
         A_WATER_RESET => {
             a.store.water_ml = 0;
+            a.reset_flash_until = GetTickCount64() + 1500;
             store::save(&a.store);
+        }
+        A_MONITOR => {
+            a.store.monitor = param;
+            store::save(&a.store);
+            place_window(hwnd, a.cur_px.0, a.cur_px.1);
+        }
+        A_MINIMAL => {
+            a.store.minimal = !a.store.minimal;
+            store::save(&a.store);
+            apply_size(hwnd);
+        }
+        A_OPEN_MODE => {
+            a.store.open_click = param == 1;
+            store::save(&a.store);
+        }
+        A_PAGE_ICONS => {
+            a.store.page_icons = !a.store.page_icons;
+            a.dots_hover = false;
+            store::save(&a.store);
+        }
+        A_ANIM => {
+            a.store.anim_fast = param == 1;
+            store::save(&a.store);
+        }
+        A_SHOW_LYRICS => {
+            a.store.show_lyrics = !a.store.show_lyrics;
+            if !a.store.show_lyrics {
+                a.lyrics_open = false;
+            }
+            store::save(&a.store);
+        }
+        A_POMO_FOCUS | A_POMO_SHORT | A_POMO_LONG => {
+            let (v, step, lo, hi) = match code {
+                A_POMO_FOCUS => (&mut a.store.pomo_focus, 5, 5, 90),
+                A_POMO_SHORT => (&mut a.store.pomo_short, 1, 1, 30),
+                _ => (&mut a.store.pomo_long, 5, 5, 60),
+            };
+            *v = (*v + step * param).clamp(lo, hi);
+            store::save(&a.store);
+            if !a.pomo_running {
+                set_pomo_mode(a.pomo_mode);
+            }
+        }
+        A_WATER_GOAL => {
+            a.store.water_goal = param;
+            store::save(&a.store);
+        }
+        A_DRINK_ML => {
+            a.store.drink_ml = (a.store.drink_ml + 50 * param).clamp(50, 3000);
+            store::save(&a.store);
+        }
+        A_ACTIVE_FROM => {
+            a.store.active_from = (a.store.active_from + param).clamp(0, 23);
+            store::save(&a.store);
+        }
+        A_ACTIVE_UNTIL => {
+            a.store.active_until = (a.store.active_until + param).clamp(0, 23);
+            store::save(&a.store);
+        }
+        A_EMPTY_SHELF => {
+            a.store.empty_shelf = !a.store.empty_shelf;
+            store::save(&a.store);
+        }
+        A_OPEN_LRCLIB => {
+            ShellExecuteW(null_mut(), wide("open").as_ptr(), wide("https://lrclib.net").as_ptr(), null(), null(), SW_SHOW as i32);
         }
         A_OPEN_REPO => {
             ShellExecuteW(null_mut(), wide("open").as_ptr(), wide(REPO_URL).as_ptr(), null(), null(), SW_SHOW as i32);
@@ -1236,15 +1395,10 @@ unsafe fn do_action(code: i32, param: i32, x: i32, _y: i32, hwnd: HWND) {
             a.pomo_running = false;
             a.pomo_left = a.pomo_total;
         }
-        A_POMO_MODE => {
-            a.pomo_total = (param as u32) * 60;
-            a.pomo_left = a.pomo_total;
-            a.pomo_running = false;
-            a.pomo_label = if param == 5 { "Break time".into() } else { "Focus time".into() };
-        }
+        A_POMO_MODE => set_pomo_mode(if param == 5 { 1 } else { 0 }),
         A_DRINK => {
-            if a.store.water_ml < 1500 {
-                a.store.water_ml = (a.store.water_ml + 250).min(1500);
+            if a.store.water_ml < a.store.water_goal {
+                a.store.water_ml = (a.store.water_ml + a.store.drink_ml).min(a.store.water_goal);
                 store::save(&a.store);
             }
         }
@@ -1374,14 +1528,54 @@ unsafe fn collapse(hwnd: HWND) {
 }
 
 // ---------- settings window ----------
-// Its own window (sidebar of sections + cards on the right), opened from
-// the gear on the notch. Design units are 96-dpi pixels, scaled to the
-// Windows display scaling.
-const CARD_S: u32 = cr(40, 40, 44);
-const ROW_H: i32 = 56;
+// Its own window, laid out like the "Nusa Settings" design (dark theme):
+// a sidebar of sections with coloured icon tiles, About pinned at the
+// bottom, and grouped cards of rows on the right. Opened from the gear on
+// the notch. Design units are 96-dpi pixels, scaled to Windows scaling.
+const S_WIN: u32 = cr(34, 34, 37);
+const S_SIDE: u32 = cr(24, 24, 27);
+const S_CARD: u32 = cr(44, 44, 47);
+const S_TEXT: u32 = cr(245, 245, 247);
+const S_SUB: u32 = cr(152, 152, 159);
+const S_LINE: u32 = cr(60, 60, 63);
+const S_SEL: u32 = cr(52, 52, 55);
+const S_HOVER: u32 = cr(42, 42, 45);
+const S_SEG: u32 = cr(61, 61, 64);
+const S_SEGSEL: u32 = cr(99, 99, 102);
+const S_OFF: u32 = cr(74, 74, 77);
+const S_ON: u32 = cr(52, 199, 89);
+const S_RED: u32 = cr(255, 69, 58);
+
+enum RowKind {
+    Switch(bool, i32, bool),             // on, action, enabled
+    Seg(Vec<(String, i32)>, i32, i32),   // (label, value), current value, action
+    Step(String, i32),                   // shown value, action (param -1 / +1)
+    Link(String, i32),                   // right-hand text, action
+    Plain(String, i32),                  // red text button, action
+    Text(String),                        // right-hand text
+}
+
+struct Row {
+    title: String,
+    sub: String,
+    kind: RowKind,
+}
+
+fn row(title: &str, sub: &str, kind: RowKind) -> Row {
+    Row { title: title.to_string(), sub: sub.to_string(), kind }
+}
+
+fn seg(opts: &[(&str, i32)], cur: i32, code: i32) -> RowKind {
+    RowKind::Seg(opts.iter().map(|(l, v)| (l.to_string(), *v)).collect(), cur, code)
+}
 
 fn settings_scale() -> i32 {
-    unsafe { (GetDpiForSystem() as i32 * 100 / 96).max(100) }
+    unsafe {
+        let s = (GetDpiForSystem() as i32 * 100 / 96).max(100);
+        // keep the window on screen on small displays
+        let fit = GetSystemMetrics(SM_CYSCREEN) * 90 / SET_H;
+        s.min(fit.max(60))
+    }
 }
 
 unsafe fn open_settings() {
@@ -1408,7 +1602,7 @@ unsafe fn open_settings() {
         return;
     }
     a.settings_hwnd = hwnd;
-    let rad = 24 * sc / 100;
+    let rad = 28 * sc / 100; // 14 px corners
     SetWindowRgn(hwnd, CreateRoundRectRgn(0, 0, w + 1, h + 1, rad, rad), 1);
     ShowWindow(hwnd, SW_SHOW);
     SetForegroundWindow(hwnd);
@@ -1433,155 +1627,355 @@ unsafe fn draw_droplet(hdc: HDC, dx: i32, dy: i32, col: u32) {
     DeleteObject(pen as HGDIOBJ);
 }
 
-unsafe fn set_header(hdc: HDC, x0: i32, cw: i32, y: &mut i32, label: &str) {
-    draw_text(hdc, label, x0 + 4, *y, cw, 20, "Segoe UI", 12, 600, DIM, DT_LEFT);
-    *y += 24;
+// Section label above a card ("Startup", "Notch" ...).
+unsafe fn s_h2(hdc: HDC, x0: i32, cw: i32, y: &mut i32, label: &str) {
+    *y += 16;
+    draw_text(hdc, label, x0 + 8, *y, cw, 16, "Segoe UI", 12, 500, S_SUB, DT_LEFT);
+    *y += 22;
 }
 
-unsafe fn row_text(hdc: HDC, x: i32, y: i32, w: i32, title: &str, sub: &str, enabled: bool) {
-    let tc = if enabled { WHITE } else { FAINT };
-    if sub.is_empty() {
-        draw_text(hdc, title, x + 16, y, w - 32, ROW_H, "Segoe UI", 14, 500, tc, DT_LEFT | DT_END_ELLIPSIS);
-    } else {
-        draw_text(hdc, title, x + 16, y + 9, w - 32, 20, "Segoe UI", 14, 500, tc, DT_LEFT | DT_END_ELLIPSIS);
-        draw_text(hdc, sub, x + 16, y + 29, w - 32, 18, "Segoe UI", 12, 400, if enabled { DIM } else { FAINT }, DT_LEFT | DT_END_ELLIPSIS);
-    }
+fn row_h(r: &Row) -> i32 {
+    if r.sub.is_empty() { 44 } else { 52 }
 }
 
-unsafe fn toggle_switch(hdc: HDC, tx: i32, ty: i32, on: bool, enabled: bool) {
+unsafe fn s_switch(hdc: HDC, x: i32, y: i32, on: bool, enabled: bool) {
     let track = match (on, enabled) {
-        (true, true) => GREEN,
-        (true, false) => cr(38, 96, 54),
-        _ => cr(64, 64, 70),
+        (true, true) => S_ON,
+        (true, false) => cr(36, 92, 52),
+        _ => S_OFF,
     };
-    fill_round(hdc, tx, ty, 44, 24, 24, track);
-    fill_circle(hdc, if on { tx + 32 } else { tx + 12 }, ty + 12, 9, if enabled { WHITE } else { cr(150, 150, 155) });
+    fill_round(hdc, x, y, 40, 24, 24, track);
+    fill_circle(hdc, if on { x + 28 } else { x + 12 }, y + 12, 10, if enabled { WHITE } else { cr(150, 150, 155) });
 }
 
-// One toggle row inside a card that starts at `y`.
-unsafe fn toggle_row(hdc: HDC, x0: i32, cw: i32, y: i32, title: &str, sub: &str, on: bool, enabled: bool, code: i32) {
-    row_text(hdc, x0, y, cw - 70, title, sub, enabled);
-    toggle_switch(hdc, x0 + cw - 16 - 44, y + 16, on, enabled);
-    if enabled {
-        add_action(x0, y, cw, ROW_H, code, 0);
+// Segmented control ending at `right`, vertically centred on `cy`.
+unsafe fn s_seg(hdc: HDC, right: i32, cy: i32, opts: &[(String, i32)], cur: i32, code: i32) {
+    let widths: Vec<i32> = opts.iter().map(|(l, _)| text_width(l, "Segoe UI", 12, 400, hdc) + 24).collect();
+    let total: i32 = widths.iter().sum::<i32>() + 4;
+    let x0 = right - total;
+    fill_round(hdc, x0, cy - 14, total, 28, 16, S_SEG);
+    let mut x = x0 + 2;
+    for (i, (label, val)) in opts.iter().enumerate() {
+        let on = *val == cur;
+        if on {
+            fill_round(hdc, x, cy - 12, widths[i], 24, 12, S_SEGSEL);
+        }
+        draw_text(hdc, label, x, cy - 12, widths[i], 24, "Segoe UI", 12, if on { 600 } else { 400 }, S_TEXT, DT_CENTER);
+        add_action(x, cy - 12, widths[i], 24, code, *val);
+        x += widths[i];
     }
 }
 
-unsafe fn toggle_card(hdc: HDC, x0: i32, cw: i32, y: &mut i32, title: &str, sub: &str, on: bool, code: i32) {
-    fill_round(hdc, x0, *y, cw, ROW_H, 14, CARD_S);
-    toggle_row(hdc, x0, cw, *y, title, sub, on, true, code);
-    *y += ROW_H + 18;
+unsafe fn s_row(hdc: HDC, x0: i32, cw: i32, y: i32, h: i32, r: &Row) {
+    let enabled = !matches!(r.kind, RowKind::Switch(_, _, false));
+    let tc = if enabled { S_TEXT } else { S_SUB };
+    if r.sub.is_empty() {
+        draw_text(hdc, &r.title, x0 + 14, y, cw - 28, h, "Segoe UI", 14, 500, tc, DT_LEFT | DT_END_ELLIPSIS);
+    } else {
+        draw_text(hdc, &r.title, x0 + 14, y + 9, cw - 80, 19, "Segoe UI", 14, 500, tc, DT_LEFT | DT_END_ELLIPSIS);
+        draw_text(hdc, &r.sub, x0 + 14, y + 28, cw - 80, 16, "Segoe UI", 12, 400, S_SUB, DT_LEFT | DT_END_ELLIPSIS);
+    }
+    let right = x0 + cw - 14;
+    let cy = y + h / 2;
+    match &r.kind {
+        RowKind::Switch(on, code, en) => {
+            s_switch(hdc, right - 40, cy - 12, *on, *en);
+            if *en {
+                add_action(x0, y, cw, h, *code, 0);
+            }
+        }
+        RowKind::Seg(opts, cur, code) => s_seg(hdc, right, cy, opts, *cur, *code),
+        RowKind::Step(val, code) => {
+            // [-]  value  [+]
+            let plus_x = right - 26;
+            let val_x = plus_x - 14 - 62;
+            let minus_x = val_x - 14 - 26;
+            fill_circle(hdc, minus_x + 13, cy, 13, S_SEG);
+            draw_text(hdc, "\u{2212}", minus_x, cy - 13, 26, 26, "Segoe UI", 16, 400, S_TEXT, DT_CENTER);
+            draw_text(hdc, val, val_x, cy - 12, 62, 24, "Segoe UI", 14, 400, S_SUB, DT_CENTER);
+            fill_circle(hdc, plus_x + 13, cy, 13, S_SEG);
+            draw_text(hdc, "+", plus_x, cy - 13, 26, 26, "Segoe UI", 16, 400, S_TEXT, DT_CENTER);
+            add_action(minus_x - 3, cy - 16, 32, 32, *code, -1);
+            add_action(plus_x - 3, cy - 16, 32, 32, *code, 1);
+        }
+        RowKind::Link(text, code) => {
+            let t = format!("{}  \u{203a}", text);
+            let tw = text_width(&t, "Segoe UI", 14, 400, hdc);
+            draw_text(hdc, &t, right - tw - 4, y, tw + 4, h, "Segoe UI", 14, 400, S_SUB, DT_RIGHT);
+            add_action(x0, y, cw, h, *code, 0);
+        }
+        RowKind::Plain(text, code) => {
+            let tw = text_width(text, "Segoe UI", 14, 400, hdc);
+            draw_text(hdc, text, right - tw - 4, y, tw + 4, h, "Segoe UI", 14, 400, S_RED, DT_RIGHT);
+            add_action(right - tw - 12, y + 6, tw + 14, h - 12, *code, 0);
+        }
+        RowKind::Text(text) => {
+            let tw = text_width(text, "Segoe UI", 14, 400, hdc);
+            draw_text(hdc, text, right - tw - 4, y, tw + 4, h, "Segoe UI", 14, 400, S_SUB, DT_RIGHT);
+        }
+    }
 }
 
-unsafe fn button_card(hdc: HDC, x0: i32, cw: i32, y: &mut i32, title: &str, sub: &str, btn: &str, code: i32) {
-    fill_round(hdc, x0, *y, cw, ROW_H, 14, CARD_S);
-    let bw = text_width(btn, "Segoe UI", 13, 500, hdc) + 32;
-    row_text(hdc, x0, *y, cw - bw - 24, title, sub, true);
-    let bx = x0 + cw - 16 - bw;
-    fill_round(hdc, bx, *y + 13, bw, 30, 30, cr(62, 62, 68));
-    draw_text(hdc, btn, bx, *y + 13, bw, 30, "Segoe UI", 13, 500, WHITE, DT_CENTER);
-    add_action(bx, *y + 13, bw, 30, code, 0);
-    *y += ROW_H + 18;
+// A card of rows with hairlines between them.
+unsafe fn s_group(hdc: HDC, x0: i32, cw: i32, y: &mut i32, rows: &[Row]) {
+    let total: i32 = rows.iter().map(row_h).sum();
+    fill_round(hdc, x0, *y, cw, total, 20, S_CARD);
+    let mut ry = *y;
+    for (i, r) in rows.iter().enumerate() {
+        if i > 0 {
+            fill_rect_c(hdc, x0 + 14, ry, cw - 14, 1, S_LINE);
+        }
+        let h = row_h(r);
+        s_row(hdc, x0, cw, ry, h, r);
+        ry += h;
+    }
+    *y += total;
+}
+
+// The display picker: every screen drawn to scale, the notch's one in green.
+unsafe fn s_monitors(hdc: HDC, x0: i32, cw: i32, y: i32, h: i32) {
+    let list = monitors();
+    if list.is_empty() {
+        return;
+    }
+    let cur = {
+        let want = app().store.monitor;
+        if want >= 0 && (want as usize) < list.len() { want as usize } else { list.iter().position(|(_, m)| *m).unwrap_or(0) }
+    };
+    let (mut l, mut t, mut r, mut b) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for (rc, _) in &list {
+        l = l.min(rc.left);
+        t = t.min(rc.top);
+        r = r.max(rc.right);
+        b = b.max(rc.bottom);
+    }
+    let (vw, vh) = ((r - l).max(1) as f64, (b - t).max(1) as f64);
+    let (aw, ah) = ((cw - 40) as f64, h as f64);
+    // a single screen is drawn at the design's 274 x 150
+    let k = if list.len() == 1 { (274.0 / vw).min(150.0 / vh) } else { (aw / vw).min(ah / vh) * 0.92 };
+    let (ow, oh) = (vw * k, vh * k);
+    let ox = x0 as f64 + (cw as f64 - ow) / 2.0;
+    let oy = y as f64 + (ah - oh) / 2.0;
+    for (i, (rc, main)) in list.iter().enumerate() {
+        let mx = (ox + (rc.left - l) as f64 * k) as i32 + 3;
+        let my = (oy + (rc.top - t) as f64 * k) as i32 + 3;
+        let mw = ((rc.right - rc.left) as f64 * k) as i32 - 6;
+        let mh = ((rc.bottom - rc.top) as f64 * k) as i32 - 6;
+        let on = i == cur;
+        fill_round(hdc, mx, my, mw, mh, 24, if on { cr(48, 209, 88) } else { cr(80, 80, 85) });
+        fill_round(hdc, mx + 2, my + 2, mw - 4, mh - 4, 20, if on { cr(31, 58, 41) } else { cr(52, 52, 56) });
+        if on {
+            // the notch on top of the chosen screen
+            fill_round(hdc, mx + mw / 2 - 19, my + 2, 38, 6, 6, S_TEXT);
+            fill_rect_c(hdc, mx + mw / 2 - 19, my + 2, 38, 3, S_TEXT);
+        }
+        draw_text(hdc, &format!("{}", i + 1), mx, my + mh / 2 - 20, mw, 24, "Segoe UI", 17, 700, S_TEXT, DT_CENTER);
+        let info = format!("{}\u{00d7}{}{}", rc.right - rc.left, rc.bottom - rc.top, if *main { " \u{00b7} Main" } else { "" });
+        draw_text(hdc, &info, mx, my + mh / 2 + 4, mw, 18, "Segoe UI", 12, 400, S_SUB, DT_CENTER | DT_END_ELLIPSIS);
+        add_action(mx, my, mw, mh, A_MONITOR, i as i32);
+    }
+}
+
+// App icon for About: a little notch face, like the design's logo.
+unsafe fn s_logo(hdc: HDC, cx: i32, y: i32) {
+    let x = cx - 40;
+    fill_round(hdc, x + 2, y + 4, 80, 80, 36, cr(14, 14, 16)); // soft shadow
+    fill_round(hdc, x, y, 80, 80, 36, cr(232, 235, 244));
+    // body: dark notch shape
+    let pts = [
+        POINT { x: x + 16, y: y + 24 },
+        POINT { x: x + 28, y: y + 32 },
+        POINT { x: x + 52, y: y + 32 },
+        POINT { x: x + 64, y: y + 24 },
+        POINT { x: x + 64, y: y + 56 },
+        POINT { x: x + 16, y: y + 56 },
+    ];
+    let brush = CreateSolidBrush(cr(18, 18, 24));
+    let pen = CreatePen(PS_NULL as i32, 0, 0);
+    let ob = SelectObject(hdc, brush as HGDIOBJ);
+    let op = SelectObject(hdc, pen as HGDIOBJ);
+    Polygon(hdc, pts.as_ptr(), pts.len() as i32);
+    SelectObject(hdc, ob);
+    SelectObject(hdc, op);
+    DeleteObject(brush as HGDIOBJ);
+    DeleteObject(pen as HGDIOBJ);
+    fill_round(hdc, x + 16, y + 46, 48, 20, 22, cr(18, 18, 24));
+    // eyes
+    fill_round(hdc, x + 28, y + 42, 6, 9, 6, cr(207, 230, 255));
+    fill_round(hdc, x + 46, y + 42, 6, 9, 6, cr(207, 230, 255));
+    // smile: blue -> purple
+    for i in 0..16 {
+        let t = i as f64 / 15.0;
+        let col = cr((10.0 + 181.0 * t) as u32, (132.0 - 42.0 * t) as u32, (255.0 - 13.0 * t) as u32);
+        let px = x + 24 + (32.0 * t) as i32;
+        let py = y + 58 + (3.0 * (1.0 - (2.0 * t - 1.0).powi(2))) as i32;
+        fill_circle(hdc, px, py, 2, col);
+    }
+}
+
+fn hour_str(h: i32) -> String {
+    format!("{:02}:00", h)
 }
 
 unsafe fn paint_settings_window(hdc: HDC, w: i32, h: i32) {
     let a = app();
     a.set_actions.clear();
     a.painting_settings = true;
-    fill_rect_c(hdc, 0, 0, w, h, cr(24, 24, 26));
-    fill_rect_c(hdc, 0, 0, SIDEBAR_W, h, cr(32, 32, 35));
-    fill_rect_c(hdc, SIDEBAR_W, 0, 1, h, cr(46, 46, 50));
-    // close
-    fill_circle(hdc, 26, 24, 7, cr(255, 95, 87));
-    add_action(14, 12, 26, 26, S_CLOSE, 0);
-    // sidebar: sections, About pinned to the bottom
+    fill_rect_c(hdc, 0, 0, w, h, S_WIN);
+    fill_rect_c(hdc, 0, 0, SIDEBAR_W, h, S_SIDE);
+    fill_rect_c(hdc, SIDEBAR_W, 0, 1, h, S_LINE);
+    // window lights: close, minimise, (zoom does nothing)
+    for (i, col) in [cr(255, 95, 87), cr(254, 188, 46), cr(40, 200, 64)].iter().enumerate() {
+        let cx = 24 + i as i32 * 20;
+        fill_circle(hdc, cx, 22, 6, *col);
+    }
+    add_action(14, 12, 20, 20, S_CLOSE, 0);
+    add_action(34, 12, 20, 20, S_MINIMIZE, 0);
+    // sidebar
     let sec = a.settings_section.min(SECTIONS.len() - 1);
+    let last = SECTIONS.len() - 1;
     for (i, (name, glyph, col)) in SECTIONS.iter().enumerate() {
-        let y = if i == SECTIONS.len() - 1 { h - 58 } else { 52 + i as i32 * 42 };
-        let selected = i == sec;
-        if selected {
-            fill_round(hdc, 12, y, SIDEBAR_W - 24, 38, 12, cr(52, 52, 57));
+        let y = if i == last { h - 50 } else { 44 + i as i32 * 38 };
+        if i == sec {
+            fill_round(hdc, 12, y, SIDEBAR_W - 24, 36, 16, S_SEL);
+        } else if a.settings_hover == i as i32 {
+            fill_round(hdc, 12, y, SIDEBAR_W - 24, 36, 16, S_HOVER);
         }
-        fill_round(hdc, 22, y + 6, 26, 26, 9, *col);
+        fill_round(hdc, 20, y + 5, 26, 26, 14, *col);
         if glyph.is_empty() {
-            draw_droplet(hdc, 35, y + 19, WHITE);
+            draw_droplet(hdc, 33, y + 18, WHITE);
         } else {
-            draw_text(hdc, glyph, 22, y + 6, 26, 26, "Segoe MDL2 Assets", 13, 400, WHITE, DT_CENTER);
+            draw_text(hdc, glyph, 20, y + 5, 26, 26, "Segoe MDL2 Assets", 13, 400, WHITE, DT_CENTER);
         }
-        draw_text(hdc, name, 60, y, SIDEBAR_W - 72, 38, "Segoe UI", 14, if selected { 600 } else { 400 }, WHITE, DT_LEFT);
-        add_action(12, y, SIDEBAR_W - 24, 38, S_SECTION, i as i32);
+        draw_text(hdc, name, 56, y, SIDEBAR_W - 72, 36, "Segoe UI", 14, 400, S_TEXT, DT_LEFT);
+        add_action(12, y, SIDEBAR_W - 24, 36, S_SECTION, i as i32);
     }
     // content
-    let x0 = SIDEBAR_W + 28;
-    let cw = w - x0 - 28;
-    draw_text(hdc, SECTIONS[sec].0, x0, 22, cw, 40, "Segoe UI", 22, 700, WHITE, DT_LEFT);
-    let mut y = 76;
+    let x0 = SIDEBAR_W + 26;
+    let cw = w - x0 - 26;
+    let mut y = 22;
+    if sec != last {
+        draw_text(hdc, SECTIONS[sec].0, x0, y, cw, 30, "Segoe UI", 22, 700, S_TEXT, DT_LEFT);
+        y += 30;
+    }
+    let st = &a.store;
     match sec {
         0 => {
-            set_header(hdc, x0, cw, &mut y, "Startup");
-            toggle_card(hdc, x0, cw, &mut y, "Start with Windows", "Open Isle when you sign in", a.autostart, A_AUTOSTART);
-            set_header(hdc, x0, cw, &mut y, "Notch");
-            fill_round(hdc, x0, y, cw, 100, 14, CARD_S);
-            row_text(hdc, x0, y, cw, "Size", "How big the opened notch is", true);
-            let (sx0, sw_all) = (x0 + 16, cw - 32);
-            fill_round(hdc, sx0, y + 56, sw_all, 30, 30, cr(26, 26, 29));
+            s_h2(hdc, x0, cw, &mut y, "Startup");
+            s_group(hdc, x0, cw, &mut y, &[row("Start with Windows", "", RowKind::Switch(a.autostart, A_AUTOSTART, true))]);
+            s_h2(hdc, x0, cw, &mut y, "Notch");
+            // Size: heading, full-width segmented control, then more rows
+            let card_h = 52 + 40 + 52;
+            fill_round(hdc, x0, y, cw, card_h, 20, S_CARD);
+            draw_text(hdc, "Size", x0 + 14, y + 9, cw - 28, 19, "Segoe UI", 14, 500, S_TEXT, DT_LEFT);
+            draw_text(hdc, "Applies right away", x0 + 14, y + 28, cw - 28, 16, "Segoe UI", 12, 400, S_SUB, DT_LEFT);
+            let (sx0, sw_all) = (x0 + 14, cw - 28);
+            let sy = y + 52;
+            fill_round(hdc, sx0, sy, sw_all, 28, 16, S_SEG);
             let choices: [(i32, &str); 5] = [(0, "Auto"), (100, "100%"), (115, "115%"), (130, "130%"), (150, "150%")];
             for (i, (val, label)) in choices.iter().enumerate() {
-                let sx = sx0 + sw_all * i as i32 / 5;
-                let segw = sx0 + sw_all * (i as i32 + 1) / 5 - sx;
-                let on = a.store.scale == *val;
+                let bx = sx0 + 2 + (sw_all - 4) * i as i32 / 5;
+                let bw = sx0 + 2 + (sw_all - 4) * (i as i32 + 1) / 5 - bx;
+                let on = st.scale == *val;
                 if on {
-                    fill_round(hdc, sx + 2, y + 58, segw - 4, 26, 26, cr(88, 88, 96));
+                    fill_round(hdc, bx, sy + 2, bw, 24, 12, S_SEGSEL);
                 }
-                draw_text(hdc, label, sx, y + 56, segw, 30, "Segoe UI", 12, if on { 650 } else { 500 }, if on { WHITE } else { DIM }, DT_CENTER);
-                add_action(sx, y + 56, segw, 30, A_SET_SCALE, *val);
+                draw_text(hdc, label, bx, sy + 2, bw, 24, "Segoe UI", 12, if on { 600 } else { 400 }, S_TEXT, DT_CENTER);
+                add_action(bx, sy, bw, 28, A_SET_SCALE, *val);
             }
-            y += 100 + 18;
-            set_header(hdc, x0, cw, &mut y, "Sounds");
-            toggle_card(hdc, x0, cw, &mut y, "Reminder sounds", "Chimes for Pomodoro and Water", a.store.sounds, A_SOUNDS);
-            set_header(hdc, x0, cw, &mut y, "Full screen");
-            toggle_card(hdc, x0, cw, &mut y, "Hide in full screen", "Games, videos and slides that fill the screen", a.store.hide_fs, A_HIDE_FS);
+            let ry = y + 92;
+            fill_rect_c(hdc, x0 + 14, ry, cw - 14, 1, S_LINE);
+            s_row(hdc, x0, cw, ry, 52, &row("Minimal notch", "A tiny tab when nothing is playing (off shows the time)", RowKind::Switch(st.minimal, A_MINIMAL, true)));
+            y += card_h;
+            s_h2(hdc, x0, cw, &mut y, "Sounds");
+            s_group(hdc, x0, cw, &mut y, &[row("Reminder sounds", "Chimes for Pomodoro and Water", RowKind::Switch(st.sounds, A_SOUNDS, true))]);
+            s_h2(hdc, x0, cw, &mut y, "Full screen");
+            s_group(hdc, x0, cw, &mut y, &[row("Hide in full screen", "Games, videos and slides that fill the screen", RowKind::Switch(st.hide_fs, A_HIDE_FS, true))]);
         }
         1 => {
-            set_header(hdc, x0, cw, &mut y, "Minimized notch");
-            fill_round(hdc, x0, y, cw, ROW_H * 2 + 1, 14, CARD_S);
-            toggle_row(hdc, x0, cw, y, "Mini player", "Album art and a sound wave while music plays", a.store.mini_player, true, A_MINI_PLAYER);
-            fill_rect_c(hdc, x0 + 16, y + ROW_H, cw - 32, 1, cr(54, 54, 59));
-            toggle_row(hdc, x0, cw, y + ROW_H + 1, "Lyrics in the mini player", "The current lyric line instead of the song name", a.store.mini_lyrics, a.store.mini_player, A_MINI_LYRICS);
-            y += ROW_H * 2 + 1 + 18;
-            set_header(hdc, x0, cw, &mut y, "Lyrics");
-            fill_round(hdc, x0, y, cw, ROW_H, 14, CARD_S);
-            row_text(hdc, x0, y, cw, "Synced lyrics from LRCLIB", "Open Lyrics from the player; click a line to jump to it", true);
+            s_h2(hdc, x0, cw, &mut y, "Notch screen");
+            let multi = monitors().len() > 1;
+            let card_h = 52 + 182;
+            fill_round(hdc, x0, y, cw, card_h, 20, S_CARD);
+            draw_text(hdc, "Display", x0 + 14, y + 9, cw - 28, 19, "Segoe UI", 14, 500, S_TEXT, DT_LEFT);
+            let sub = if multi { "Click a screen to put the notch there" } else { "Connect another display to choose where the notch appears" };
+            draw_text(hdc, sub, x0 + 14, y + 28, cw - 28, 16, "Segoe UI", 12, 400, S_SUB, DT_LEFT);
+            s_monitors(hdc, x0, cw, y + 62, 150);
         }
         2 => {
-            set_header(hdc, x0, cw, &mut y, "Reminders");
-            toggle_card(hdc, x0, cw, &mut y, "Water reminders", "Daily goal 1.5 L, 250 ml per drink", a.store.reminders, A_WATER_BELL);
-            set_header(hdc, x0, cw, &mut y, "Today");
-            let today = format!("{:.2} L of 1.5 L", a.store.water_ml as f64 / 1000.0);
-            button_card(hdc, x0, cw, &mut y, &today, "Starts again at zero every day", "Reset", A_WATER_RESET);
+            s_h2(hdc, x0, cw, &mut y, "Notch");
+            s_group(hdc, x0, cw, &mut y, &[
+                row("Open the notch", "", seg(&[("Hover", 0), ("Click", 1)], st.open_click as i32, A_OPEN_MODE)),
+                row("Page icons", "Show page icons when you hover the page dots", RowKind::Switch(st.page_icons, A_PAGE_ICONS, true)),
+            ]);
+            s_h2(hdc, x0, cw, &mut y, "Motion");
+            s_group(hdc, x0, cw, &mut y, &[row("Animation speed", "", seg(&[("Normal", 0), ("Fast", 1)], st.anim_fast as i32, A_ANIM))]);
         }
         3 => {
-            set_header(hdc, x0, cw, &mut y, "Files");
-            let n = a.shelf_items.len();
-            let t = format!("{} file{} on the shelf", n, if n == 1 { "" } else { "s" });
-            button_card(hdc, x0, cw, &mut y, &t, "Drop files on the notch to add them", "Clear shelf", A_SHELF_CLEAR);
+            s_h2(hdc, x0, cw, &mut y, "Lyrics");
+            s_group(hdc, x0, cw, &mut y, &[row("Show lyrics", "From LRCLIB, a community-contributed lyrics database", RowKind::Switch(st.show_lyrics, A_SHOW_LYRICS, true))]);
+            s_h2(hdc, x0, cw, &mut y, "Minimized notch");
+            s_group(hdc, x0, cw, &mut y, &[
+                row("Mini player", "Album art and a sound wave while music plays", RowKind::Switch(st.mini_player, A_MINI_PLAYER, true)),
+                row("Lyrics in the mini player", "The current line instead of the song name", RowKind::Switch(st.mini_lyrics, A_MINI_LYRICS, st.mini_player && st.show_lyrics)),
+            ]);
         }
         4 => {
-            set_header(hdc, x0, cw, &mut y, "Tasks");
-            let done = a.store.tasks.iter().filter(|t| t.done).count();
-            let t = format!("{} of {} done", done, a.store.tasks.len());
-            button_card(hdc, x0, cw, &mut y, &t, "Add, tick and edit tasks on the notch", "Clear completed", A_TODO_CLEAR_DONE);
+            let done = st.tasks.iter().filter(|t| t.done).count();
+            s_h2(hdc, x0, cw, &mut y, "Tasks");
+            s_group(hdc, x0, cw, &mut y, &[
+                row("Done today", "", RowKind::Text(format!("{} of {}", done, st.tasks.len()))),
+                row("Completed tasks", "", RowKind::Plain("Clear".into(), A_TODO_CLEAR_DONE)),
+            ]);
+        }
+        5 => {
+            s_h2(hdc, x0, cw, &mut y, "Durations");
+            s_group(hdc, x0, cw, &mut y, &[
+                row("Focus", "", RowKind::Step(format!("{} min", st.pomo_focus), A_POMO_FOCUS)),
+                row("Short break", "", RowKind::Step(format!("{} min", st.pomo_short), A_POMO_SHORT)),
+                row("Long break", "", RowKind::Step(format!("{} min", st.pomo_long), A_POMO_LONG)),
+            ]);
+            draw_text(hdc, "Every fourth break is a long one.", x0 + 8, y + 8, cw, 18, "Segoe UI", 12, 400, S_SUB, DT_LEFT);
+        }
+        6 => {
+            s_h2(hdc, x0, cw, &mut y, "Reminders");
+            s_group(hdc, x0, cw, &mut y, &[row("Water reminders", "Spread across your active hours", RowKind::Switch(st.reminders, A_WATER_BELL, true))]);
+            s_h2(hdc, x0, cw, &mut y, "Plan");
+            s_group(hdc, x0, cw, &mut y, &[
+                row("Daily goal", "", seg(&[("1.5 L", 1500), ("2 L", 2000), ("2.5 L", 2500), ("3 L", 3000)], st.water_goal, A_WATER_GOAL)),
+                row("Per drink", "", RowKind::Step(format!("{} ml", st.drink_ml), A_DRINK_ML)),
+                row("Active from", "", RowKind::Step(hour_str(st.active_from), A_ACTIVE_FROM)),
+                row("Active until", "", RowKind::Step(hour_str(st.active_until), A_ACTIVE_UNTIL)),
+            ]);
+            s_h2(hdc, x0, cw, &mut y, "Today");
+            let flash = GetTickCount64() < a.reset_flash_until;
+            s_group(hdc, x0, cw, &mut y, &[row("Today\u{2019}s progress", "", RowKind::Plain(if flash { "Cleared".into() } else { "Reset".into() }, A_WATER_RESET))]);
+        }
+        7 => {
+            s_h2(hdc, x0, cw, &mut y, "Shelf");
+            s_group(hdc, x0, cw, &mut y, &[
+                row("Start with an empty Shelf", "Files from your last session are cleared when Isle starts", RowKind::Switch(st.empty_shelf, A_EMPTY_SHELF, true)),
+                row("Files on the Shelf", "", RowKind::Plain(if a.shelf_items.is_empty() { "None".into() } else { format!("Clear {}", a.shelf_items.len()) }, A_SHELF_CLEAR)),
+            ]);
         }
         _ => {
-            draw_text(hdc, "Isle", x0, y, cw, 44, "Segoe UI", 30, 750, WHITE, DT_LEFT);
-            y += 44;
+            let cx = x0 + cw / 2;
+            y += 6;
+            s_logo(hdc, cx, y);
+            y += 88;
+            draw_text(hdc, "Isle", x0, y, cw, 32, "Segoe UI", 23, 700, S_TEXT, DT_CENTER);
+            y += 32;
             let ver = format!("Version {}", env!("CARGO_PKG_VERSION"));
-            draw_text(hdc, &ver, x0, y, cw, 20, "Segoe UI", 13, 400, DIM, DT_LEFT);
+            draw_text(hdc, &ver, x0, y, cw, 19, "Segoe UI", 13, 400, S_SUB, DT_CENTER);
+            y += 19;
+            draw_text(hdc, "A living notch for Windows", x0, y, cw, 19, "Segoe UI", 13, 400, S_SUB, DT_CENTER);
             y += 22;
-            draw_text(hdc, "A living notch for Windows, native Rust.", x0, y, cw, 20, "Segoe UI", 13, 400, DIM, DT_LEFT);
-            y += 40;
-            button_card(hdc, x0, cw, &mut y, "Source code", "github.com/Sree-Ram-MS/Isle-Dynamic-Island-Extension", "Open", A_OPEN_REPO);
-            draw_text(hdc, "Inspired by Nusa for Windows. Right-click the notch to quit.", x0 + 4, y, cw, 20, "Segoe UI", 12, 400, FAINT, DT_LEFT);
+            s_h2(hdc, x0, cw, &mut y, "Info");
+            s_group(hdc, x0, cw, &mut y, &[
+                row("Website", "", RowKind::Link("github.com/Sree-Ram-MS".into(), A_OPEN_REPO)),
+                row("Lyrics", "", RowKind::Link("LRCLIB".into(), A_OPEN_LRCLIB)),
+                row("Made by", "", RowKind::Text("Sree Ram M S".into())),
+            ]);
         }
     }
     a.painting_settings = false;
@@ -1636,6 +2030,9 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
                     S_CLOSE => {
                         DestroyWindow(hwnd);
                     }
+                    S_MINIMIZE => {
+                        ShowWindow(hwnd, SW_MINIMIZE);
+                    }
                     S_SECTION => {
                         app().settings_section = param as usize;
                         if param == 0 {
@@ -1643,8 +2040,48 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
                         }
                         InvalidateRect(hwnd, null(), 0);
                     }
-                    _ => do_action(code, param, x, y, app().hwnd),
+                    _ => {
+                        do_action(code, param, x, y, app().hwnd);
+                        if code == A_WATER_RESET {
+                            SetTimer(hwnd, 1, 1600, None);
+                        }
+                    }
                 }
+            }
+            0
+        }
+        WM_TIMER => {
+            KillTimer(hwnd, 1);
+            InvalidateRect(hwnd, null(), 0);
+            0
+        }
+        // hover highlight on the sidebar
+        WM_MOUSEMOVE => {
+            let (x, y) = settings_to_design(hwnd, (lparam & 0xFFFF) as i16 as i32, ((lparam >> 16) & 0xFFFF) as i16 as i32);
+            let hov = match settings_hit(x, y) {
+                Some((S_SECTION, p)) => p,
+                _ => -1,
+            };
+            let a = app();
+            if hov != a.settings_hover {
+                a.settings_hover = hov;
+                InvalidateRect(hwnd, null(), 0);
+            }
+            if hov >= 0 {
+                let mut tme = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                TrackMouseEvent(&mut tme);
+            }
+            0
+        }
+        WM_MOUSELEAVE_MSG => {
+            if app().settings_hover != -1 {
+                app().settings_hover = -1;
+                InvalidateRect(hwnd, null(), 0);
             }
             0
         }
@@ -1797,8 +2234,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 a.tracking = true;
             }
             if !a.expanded {
-                a.expanded = true;
-                apply_size(hwnd);
+                if !a.store.open_click {
+                    a.expanded = true;
+                    apply_size(hwnd);
+                }
                 return 0;
             }
             if a.animating {
@@ -1814,7 +2253,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // bottom dots <-> page icons on hover
             let (dw, dh) = cur_design();
             let z = dots_zone(dw, dh, a.dots_hover);
-            let over = x >= z.left && x < z.right && y >= z.top && y < z.bottom;
+            let over = a.store.page_icons && x >= z.left && x < z.right && y >= z.top && y < z.bottom;
             if over != a.dots_hover {
                 a.dots_hover = over;
                 InvalidateRect(hwnd, null(), 0);
@@ -1872,6 +2311,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 return 0;
             }
             if app().animating {
+                return 0;
+            }
+            if !app().expanded {
+                // "Open the notch: Click"
+                app().expanded = true;
+                app().popup_until = 0;
+                apply_size(hwnd);
                 return 0;
             }
             let (x, y) = lparam_to_design(hwnd, lparam);
@@ -1984,15 +2430,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     if a.store.sounds {
                         MessageBeep(0x40);
                     }
-                    // auto-switch focus <-> break, paused, like the original cycle
-                    if a.pomo_total == 1500 {
-                        a.pomo_total = 300;
-                        a.pomo_label = "Break time".into();
+                    // auto-switch focus <-> break, paused, like the original
+                    // cycle; every 4th break is a long one
+                    if a.pomo_mode == 0 {
+                        a.pomo_count += 1;
+                        set_pomo_mode(if a.pomo_count % 4 == 0 { 2 } else { 1 });
                     } else {
-                        a.pomo_total = 1500;
-                        a.pomo_label = "Focus time".into();
+                        set_pomo_mode(0);
                     }
-                    a.pomo_left = a.pomo_total;
                 }
             }
             // hide while a full-screen app is running (games, video, slides)
@@ -2007,6 +2452,44 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
             } else if !visible {
                 ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            }
+            // water reminders: spread the day's drinks over the active
+            // hours; each one pops the notch open on the Water page
+            let now = GetTickCount64();
+            if a.last_water_tick == 0 {
+                a.last_water_tick = now;
+            }
+            if a.store.reminders && a.store.water_ml < a.store.water_goal {
+                let mut t: SYSTEMTIME = std::mem::zeroed();
+                GetLocalTime(&mut t);
+                let (from, until) = (a.store.active_from, a.store.active_until);
+                let hr = t.wHour as i32;
+                if until > from && hr >= from && hr < until {
+                    let drinks = (a.store.water_goal / a.store.drink_ml.max(1)).max(1) as u64;
+                    let every_ms = ((until - from) as u64 * 3_600_000 / drinks).max(15 * 60_000);
+                    if now.saturating_sub(a.last_water_tick) >= every_ms && !a.expanded {
+                        a.last_water_tick = now;
+                        a.page = 2;
+                        a.lyrics_open = false;
+                        a.expanded = true;
+                        a.popup_until = now + 6000;
+                        if a.store.sounds {
+                            MessageBeep(0x40);
+                        }
+                        apply_size(hwnd);
+                    }
+                }
+            }
+            // close a reminder popup the pointer never touched
+            if a.popup_until > 0 && now >= a.popup_until {
+                a.popup_until = 0;
+                let mut p = POINT { x: 0, y: 0 };
+                GetCursorPos(&mut p);
+                let mut wr: RECT = std::mem::zeroed();
+                GetWindowRect(hwnd, &mut wr);
+                if !(p.x >= wr.left && p.x < wr.right && p.y >= wr.top && p.y < wr.bottom) {
+                    collapse(hwnd);
+                }
             }
             // water day rollover
             let today = today_string();
@@ -2023,7 +2506,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             // keep lyrics fetched for the current track
             let m = media::snapshot();
-            if m.present && !m.title.is_empty() {
+            if a.store.show_lyrics && m.present && !m.title.is_empty() {
                 lyrics::ensure_fetched(&m.title, &m.artist, m.duration_secs);
             }
             // the minimized look follows playback: the mini player slides
@@ -2069,6 +2552,10 @@ fn main() {
             st.water_date = today;
             st.water_ml = 0;
         }
+        if st.empty_shelf && !st.shelf.is_empty() {
+            st.shelf.clear();
+            store::save(&st);
+        }
         let shelf_items = build_shelf_items(&st);
         *(&raw mut APP) = Some(App {
             hwnd: null_mut(),
@@ -2096,10 +2583,16 @@ fn main() {
             tracking: false,
             fonts: Vec::new(),
             actions: Vec::new(),
-            pomo_total: 1500,
-            pomo_left: 1500,
+            pomo_total: (st.pomo_focus * 60) as u32,
+            pomo_left: (st.pomo_focus * 60) as u32,
             pomo_running: false,
             pomo_label: "Focus time".into(),
+            pomo_mode: 0,
+            pomo_count: 0,
+            last_water_tick: 0,
+            popup_until: 0,
+            settings_hover: -1,
+            reset_flash_until: 0,
             vol_level: 0.0,
             vol_muted: false,
             vol_drag: false,
@@ -2144,13 +2637,13 @@ fn main() {
         RegisterClassW(&wc2);
 
         let (w, h) = cur_size();
-        let screen_w = GetSystemMetrics(SM_CXSCREEN);
+        let mon = notch_monitor();
         let hwnd = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
             class_name.as_ptr(),
             wide("Isle").as_ptr(),
             WS_POPUP,
-            (screen_w - w) / 2, 0, w, h,
+            mon.left + (mon.right - mon.left - w) / 2, mon.top, w, h,
             null_mut(), null_mut(), hinstance, null(),
         );
         if hwnd.is_null() {

@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Nusa Settings</title>
+<style>
+:root{
+  --desk1:#c9d3e6;--desk2:#e7d9ee;
+  --win:rgba(246,246,248,.86);--side:rgba(236,236,240,.7);
+  --text:#1d1d1f;--sub:#86868b;--card:#fff;--line:rgba(0,0,0,.08);
+  --sel:rgba(0,0,0,.09);--seg:rgba(0,0,0,.06);--segsel:#fff;--off:rgba(120,120,128,.25);
+  --on:#34c759;--blue:#0a84ff;--shadow:0 22px 60px rgba(0,0,0,.28),0 0 0 .5px rgba(0,0,0,.25);
+  color-scheme:light;
+  box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --desk1:#1d2433;--desk2:#2c1f3a;
+    --win:rgba(34,34,37,.88);--side:rgba(24,24,27,.75);
+    --text:#f5f5f7;--sub:#98989f;--card:#2c2c2f;--line:rgba(255,255,255,.08);
+    --sel:rgba(255,255,255,.12);--seg:rgba(255,255,255,.08);--segsel:#636366;--off:rgba(120,120,128,.4);
+    --shadow:0 22px 60px rgba(0,0,0,.6),0 0 0 .5px rgba(255,255,255,.18);color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --desk1:#1d2433;--desk2:#2c1f3a;--win:rgba(34,34,37,.88);--side:rgba(24,24,27,.75);
+  --text:#f5f5f7;--sub:#98989f;--card:#2c2c2f;--line:rgba(255,255,255,.08);
+  --sel:rgba(255,255,255,.12);--seg:rgba(255,255,255,.08);--segsel:#636366;--off:rgba(120,120,128,.4);
+  --shadow:0 22px 60px rgba(0,0,0,.6),0 0 0 .5px rgba(255,255,255,.18);color-scheme:dark;
+}
+*{box-sizing:border-box;margin:0}
+html,body{height:100%}
+body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Inter","Segoe UI",Helvetica,Arial,sans-serif;
+  background:linear-gradient(135deg,var(--desk1),var(--desk2));color:var(--text);
+  display:flex;align-items:center;justify-content:center;padding:20px;-webkit-font-smoothing:antialiased}
+.window{width:100%;max-width:820px;height:min(640px,100%);display:flex;border-radius:14px;overflow:hidden;
+  background:var(--win);backdrop-filter:blur(40px) saturate(180%);-webkit-backdrop-filter:blur(40px) saturate(180%);box-shadow:var(--shadow)}
+.sidebar{width:228px;flex:none;background:var(--side);padding:14px 12px;display:flex;flex-direction:column;border-right:.5px solid var(--line)}
+.lights{display:flex;gap:8px;padding:2px 6px 16px}
+.lights i{width:12px;height:12px;border-radius:50%;display:block}
+.lights i:nth-child(1){background:#ff5f57}.lights i:nth-child(2){background:#febc2e}.lights i:nth-child(3){background:#28c840}
+nav{display:flex;flex-direction:column;gap:2px;flex:1;overflow:auto}
+.item{display:flex;align-items:center;gap:10px;padding:5px 8px;border-radius:8px;font-size:13.5px;cursor:default;border:0;background:none;color:var(--text);text-align:left;width:100%;font-family:inherit}
+.item:hover{background:var(--seg)}
+.item.active{background:var(--sel)}
+.item:focus-visible,.seg button:focus-visible,.sw:focus-visible{outline:2px solid var(--blue);outline-offset:1px}
+.ico{width:26px;height:26px;border-radius:7px;display:grid;place-items:center;flex:none}
+.ico svg{width:15px;height:15px;fill:none;stroke:#fff;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.pro{margin-left:auto;font-size:10px;font-weight:700;color:#fff;padding:2px 7px;border-radius:99px;background:linear-gradient(90deg,#5e5ce6,#0a84ff)}
+.about{margin-top:8px}
+main{flex:1;overflow:auto;padding:22px 26px 26px}
+h1{font-size:22px;font-weight:700;letter-spacing:-.01em;margin-bottom:16px}
+h2{font-size:12px;font-weight:500;color:var(--sub);margin:16px 0 6px 8px}
+.group{background:var(--card);border-radius:10px;box-shadow:0 0 0 .5px var(--line)}
+.row{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:10px 14px;min-height:44px}
+.row+.row{border-top:.5px solid var(--line)}
+.row b{font-weight:500;font-size:13.5px;display:block}
+.row small{font-size:11.5px;color:var(--sub);display:block;margin-top:1px}
+.sw{width:40px;height:24px;border-radius:99px;background:var(--off);border:0;position:relative;flex:none;cursor:pointer;transition:background .2s}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:transform .2s}
+.sw[aria-checked="true"]{background:var(--on)}
+.sw[aria-checked="true"]::after{transform:translateX(16px)}
+.seg{display:flex;background:var(--seg);border-radius:8px;padding:2px;margin:0 14px 12px;position:relative}
+.seg button{flex:1;border:0;background:none;font:inherit;font-size:12.5px;color:var(--text);padding:4px 0;border-radius:6px;cursor:pointer;z-index:1}
+.seg button.on{background:var(--segsel);box-shadow:0 1px 3px rgba(0,0,0,.18),0 0 0 .5px rgba(0,0,0,.06);font-weight:500}
+.sizehead{padding:10px 14px 10px}
+.pane{display:none}.pane.show{display:block}
+.seg.inline{margin:0;flex:none}.seg.inline button{flex:none;padding:3px 12px}
+.step{display:flex;align-items:center;gap:14px;flex:none}.step span{min-width:62px;text-align:center;font-size:13.5px;color:var(--sub);font-variant-numeric:tabular-nums}
+.step button{width:26px;height:26px;border-radius:50%;border:0;background:var(--seg);color:var(--text);font-size:16px;line-height:1;cursor:pointer;display:grid;place-items:center;font-family:inherit}
+.step button:active{background:var(--sel)}.step button:focus-visible,.link:focus-visible,.plain:focus-visible{outline:2px solid var(--blue);outline-offset:1px}
+.plain{border:0;background:none;font:inherit;font-size:13.5px;color:#ff453a;cursor:pointer}
+.mon{position:relative;width:274px;max-width:100%;height:150px;margin:14px auto 18px;border:1.5px solid #30d158;border-radius:12px;background:rgba(48,209,88,.12);display:flex;flex-direction:column;align-items:center;justify-content:center}
+.mon::before{content:"";position:absolute;top:0;width:38px;height:6px;border-radius:0 0 6px 6px;background:var(--text);opacity:.8}
+.mon b{font-size:17px}.mon small{font-size:11.5px;color:var(--sub);margin-top:2px}
+.calbox{padding:16px 22px 18px}.calbox h3{font-size:14px;font-weight:600;margin:0 0 10px 6px}
+.cal{display:grid;grid-template-columns:repeat(7,1fr);row-gap:4px;text-align:center;font-size:13.5px;max-width:420px;margin:0 auto}
+.cal .h{font-size:11.5px;color:var(--sub);padding-bottom:4px}
+.cal .d{height:32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px}
+.cal .d.o{color:var(--sub);opacity:.5}
+.cal .d.t span{background:var(--on);color:#fff;width:26px;height:26px;border-radius:50%;display:grid;place-items:center}
+.dots{display:flex;gap:2px;height:4px}.dots i{width:4px;height:4px;border-radius:50%}
+.about-top{text-align:center;padding:6px 0 22px}.about-top svg{width:80px;height:80px;filter:drop-shadow(0 4px 10px rgba(0,0,0,.22))}
+.about-top h3{font-size:23px;margin:8px 0 2px}.about-top p{font-size:13px;color:var(--sub);line-height:1.5}
+.link{color:var(--sub);text-decoration:none;font-size:13.5px;display:flex;gap:8px;align-items:center}.link:hover{color:var(--text)}
+.empty{color:var(--sub);font-size:13px;padding:30px 14px;text-align:center}
+@media (max-width:640px){
+  body{padding:0}.window{border-radius:0;height:100%;max-width:none;flex-direction:column}
+  .sidebar{width:100%;padding:10px;flex-direction:row;align-items:center;border-right:0;border-bottom:.5px solid var(--line);overflow-x:auto}
+  .lights{padding:0 8px 0 2px}nav{flex-direction:row;overflow:visible;flex:none}.item{white-space:nowrap;width:auto}.pro,.about{display:none}
+  main{padding:16px}
+}
+</style>
+</head>
+<body>
+<div class="window" role="application" aria-label="Nusa settings">
+  <aside class="sidebar">
+    <div class="lights"><i></i><i></i><i></i></div>
+    <nav id="nav"></nav>
+    <button class="item about" data-id="about"><span class="ico" style="background:#636366"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg></span>About</button>
+  </aside>
+  <main>
+    <h1 id="title">General</h1>
+    <section class="pane show" id="p-general">
+      <h2>Startup</h2>
+      <div class="group"><div class="row"><b>Start with Mac</b><button class="sw" role="switch" aria-checked="false" aria-label="Start with Mac"></button></div></div>
+
+      <h2>Notch</h2>
+      <div class="group">
+        <div class="sizehead"><b style="font-weight:500;font-size:13.5px">Size</b><small style="font-size:11.5px;color:var(--sub);display:block;margin-top:1px">Nusa restarts to apply the new size</small></div>
+        <div class="seg" id="seg"><button class="on">Auto</button><button>100%</button><button>115%</button><button>130%</button><button>150%</button></div>
+        <div class="row"><div><b>Minimal notch</b><small>A smaller pill when nothing is playing</small></div><button class="sw" role="switch" aria-checked="false" aria-label="Minimal notch"></button></div>
+        <div class="row"><div><b>Nusa mascot</b><small>A little friend that lives in the notch</small></div><button class="sw" role="switch" aria-checked="true" aria-label="Nusa mascot"></button></div>
+      </div>
+
+      <h2>Sounds</h2>
+      <div class="group"><div class="row"><div><b>Reminder sounds</b><small>Chimes for Pomodoro, To-do and Water</small></div><button class="sw" role="switch" aria-checked="true" aria-label="Reminder sounds"></button></div></div>
+
+      <h2>Full screen</h2>
+      <div class="group"><div class="row"><div><b>Hide in full screen</b><small>Games, videos and slides that fill the screen</small></div><button class="sw" role="switch" aria-checked="true" aria-label="Hide in full screen"></button></div></div>
+    </section>
+    <section class="pane" id="p-display"><h2>Notch screen</h2><div class="group"><div class="row" style="display:block"><b>Display</b><small>Connect another display to choose where the notch appears</small><div class="mon"><b>1</b><small>1920×1080 · Main</small></div></div></div></section>
+<section class="pane" id="p-appearance"><h2>Notch</h2><div class="group">
+<div class="row"><b>Open the notch</b><div class="seg inline"><button class="on">Hover</button><button>Click</button></div></div>
+<div class="row"><div><b>Page icons</b><small>Show page icons when you hover the page dots</small></div><button class="sw" role="switch" aria-checked="true" aria-label="Page icons"></button></div></div>
+<h2>Motion</h2><div class="group"><div class="row"><b>Animation speed</b><div class="seg inline"><button class="on">Normal</button><button>Fast</button></div></div></div></section>
+<section class="pane" id="p-music"><h2>Lyrics</h2><div class="group"><div class="row"><div><b>Show lyrics</b><small>From LRCLIB, a community-contributed lyrics database</small></div><button class="sw" role="switch" aria-checked="true" aria-label="Show lyrics"></button></div></div></section>
+<section class="pane" id="p-todo"><h2>Reminders</h2><div class="group">
+<div class="row"><b>When a task starts</b><button class="sw" role="switch" aria-checked="true" aria-label="When a task starts"></button></div>
+<div class="row"><b>When time is up</b><button class="sw" role="switch" aria-checked="true" aria-label="When time is up"></button></div>
+<div class="row"><b>Snooze for</b><div class="seg inline"><button>5 min</button><button class="on">10 min</button><button>15 min</button></div></div></div></section>
+<section class="pane" id="p-calendar"><h2>Preview</h2><div class="group calbox"><h3>November 2026</h3><div class="cal" id="cal"></div></div>
+<h2>Options</h2><div class="group">
+<div class="row"><b>Week starts on</b><div class="seg inline" id="weekseg"><button class="on">Sunday</button><button>Monday</button></div></div>
+<div class="row"><b>Default view</b><div class="seg inline"><button class="on">Month</button><button>Week</button></div></div></div></section>
+<section class="pane" id="p-pomodoro"><h2>Durations</h2><div class="group">
+<div class="row"><b>Focus</b><div class="step" data-v="25" data-min="5" data-max="90" data-s="5" data-u=" min"></div></div>
+<div class="row"><b>Short break</b><div class="step" data-v="5" data-min="1" data-max="30" data-s="1" data-u=" min"></div></div>
+<div class="row"><b>Long break</b><div class="step" data-v="15" data-min="5" data-max="60" data-s="5" data-u=" min"></div></div></div></section>
+<section class="pane" id="p-water"><h2>Reminders</h2><div class="group"><div class="row"><div><b>Water reminders</b><small>Spread across your active hours</small></div><button class="sw" role="switch" aria-checked="false" aria-label="Water reminders"></button></div></div>
+<h2>Plan</h2><div class="group">
+<div class="row"><b>Daily goal</b><div class="seg inline"><button class="on">1.5 L</button><button>2 L</button><button>2.5 L</button><button>3 L</button></div></div>
+<div class="row"><b>Bottle size</b><div class="step" data-v="1450" data-min="250" data-max="3000" data-s="50" data-u=" ml"></div></div>
+<div class="row"><b>Active from</b><div class="step" data-v="8" data-min="0" data-max="23" data-s="1" data-t="1"></div></div>
+<div class="row"><b>Active until</b><div class="step" data-v="17" data-min="0" data-max="23" data-s="1" data-t="1"></div></div></div>
+<h2>Today</h2><div class="group"><div class="row"><b>Today’s progress</b><button class="plain" id="reset">Reset</button></div></div></section>
+<section class="pane" id="p-shelf"><h2>Shelf</h2><div class="group"><div class="row"><div><b>Start with an empty Shelf</b><small>Files from your last session are cleared when Nusa starts</small></div><button class="sw" role="switch" aria-checked="false" aria-label="Start with an empty Shelf"></button></div></div></section>
+<section class="pane" id="p-hud"><h2>Indicators</h2><div class="group">
+<div class="row"><b>Volume</b><button class="sw" role="switch" aria-checked="true" aria-label="Volume"></button></div>
+<div class="row"><b>Brightness</b><button class="sw" role="switch" aria-checked="true" aria-label="Brightness"></button></div>
+<div class="row"><b>Caps Lock</b><button class="sw" role="switch" aria-checked="true" aria-label="Caps Lock"></button></div>
+<div class="row"><b>Input language</b><button class="sw" role="switch" aria-checked="true" aria-label="Input language"></button></div></div>
+<h2>Popups</h2><div class="group">
+<div class="row"><b>Battery</b><button class="sw" role="switch" aria-checked="true" aria-label="Battery"></button></div>
+<div class="row"><b>Wi-Fi</b><button class="sw" role="switch" aria-checked="true" aria-label="Wi-Fi"></button></div>
+<div class="row"><b>Bluetooth headset</b><button class="sw" role="switch" aria-checked="true" aria-label="Bluetooth headset"></button></div></div></section>
+<section class="pane" id="p-about"><div class="about-top"><svg viewBox="0 0 80 80" aria-hidden="true"><defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#dfe3f0"/></linearGradient><linearGradient id="gl" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#0a84ff"/><stop offset="1" stop-color="#bf5af2"/></linearGradient></defs><rect width="80" height="80" rx="18" fill="url(#bg)"/><path d="M16 56V24l12 8h24l12-8v32c0 6-6 10-14 10H30c-8 0-14-4-14-10z" fill="#121218"/><path d="M24 58c6 4 26 4 32 0" stroke="url(#gl)" stroke-width="4" stroke-linecap="round" fill="none"/><ellipse cx="31" cy="46" rx="3.2" ry="4.2" fill="#cfe6ff"/><ellipse cx="49" cy="46" rx="3.2" ry="4.2" fill="#cfe6ff"/></svg><h3>Nusa</h3><p>Version 1.1.0<br>A living notch for Mac</p></div>
+<h2>Info</h2><div class="group">
+<div class="row"><b>Website</b><a class="link" href="https://rama2555.github.io/nusa" target="_blank" rel="noopener">rama2555.github.io/nusa <span>›</span></a></div>
+<div class="row"><b>Lyrics</b><a class="link" href="https://lrclib.net" target="_blank" rel="noopener">LRCLIB <span>›</span></a></div>
+<div class="row"><b>Made by</b><span class="link">Rama · Nusa Labs</span></div></div></section>
+  </main>
+</div>
+<script>
+const items=[
+ ["general","General","#8e8e93",'<circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/>',0],
+ ["display","Display","#5e5ce6",'<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',1],
+ ["appearance","Appearance","#3a3a3c",'<circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="#fff"/>',1],
+ ["music","Music and lyrics","#ff375f",'<path d="M9 18V6l10-2v12"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="16" r="2"/>',0],
+ ["todo","To-do","#30d158",'<path d="M7 12.5l3.2 3.2L17 9"/>',0],
+ ["calendar","Calendar","#ff453a",'<rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/>',1],
+ ["pomodoro","Pomodoro","#ff9f0a",'<circle cx="12" cy="13" r="7"/><path d="M12 9v4l2 2M10 3h4"/>',1],
+ ["water","Water","#0a84ff",'<path d="M12 3s6 6.2 6 10.5a6 6 0 0 1-12 0C6 9.2 12 3 12 3z"/>',0],
+ ["shelf","Shelf","#ffb000",'<path d="M4 8l2-3h12l2 3v10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1zM4 8h16M10 12h4"/>',0],
+ ["hud","HUD & popups","#32ade6",'<path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15zM10 20a2 2 0 0 0 4 0"/>',1]
+];
+const nav=document.getElementById('nav'),title=document.getElementById('title');
+items.forEach(([id,label,col,svg,pro],i)=>{
+  const b=document.createElement('button');b.className='item'+(i?'':' active');b.dataset.id=id;b.dataset.label=label;
+  b.innerHTML=`<span class="ico" style="background:${col}"><svg viewBox="0 0 24 24">${svg}</svg></span>${label}`;
+  nav.appendChild(b);
+});
+document.querySelector('.about').dataset.label='About';
+document.querySelectorAll('.item').forEach(b=>b.addEventListener('click',()=>{
+  document.querySelectorAll('.item').forEach(x=>x.classList.remove('active'));b.classList.add('active');
+  title.textContent=b.dataset.label;
+  document.querySelectorAll('.pane').forEach(p=>p.classList.toggle('show',p.id==='p-'+b.dataset.id));
+  title.style.display=b.dataset.id==='about'?'none':'';
+}));
+document.querySelectorAll('.sw').forEach(s=>s.addEventListener('click',()=>s.setAttribute('aria-checked',s.getAttribute('aria-checked')!=='true')));
+document.querySelectorAll('.seg').forEach(g=>g.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{
+  g.querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');
+  if(g.id==='weekseg')renderCal(b.textContent==='Monday');
+})));
+document.querySelectorAll('.step').forEach(s=>{
+  let v=+s.dataset.v;const mn=+s.dataset.min,mx=+s.dataset.max,st=+s.dataset.s;
+  s.innerHTML='<button aria-label="Decrease">−</button><span></span><button aria-label="Increase">+</button>';
+  const out=s.querySelector('span'),[m,p]=s.querySelectorAll('button');
+  const draw=()=>out.textContent=s.dataset.t?String(v).padStart(2,'0')+':00':v+s.dataset.u;
+  m.onclick=()=>{v=Math.max(mn,v-st);draw()};p.onclick=()=>{v=Math.min(mx,v+st);draw()};draw();
+});
+const ev={3:['#0a84ff'],6:['#ff453a','#bf5af2'],10:['#0a84ff'],13:['#ff453a','#bf5af2'],17:['#0a84ff'],20:['#ff453a']};
+function renderCal(mon){
+  const hd=mon?['M','T','W','T','F','S','S']:['S','M','T','W','T','F','S'];
+  let h=hd.map(x=>`<div class="h">${x}</div>`).join('');
+  const off=mon?6:0;
+  for(let i=0;i<off;i++)h+=`<div class="d o">${31-off+1+i}</div>`;
+  for(let d=1;d<=30;d++){
+    const dots=(ev[d]||[]).map(c=>`<i style="background:${c}"></i>`).join('');
+    h+=`<div class="d${d===1?' t':''}"><span>${d}</span><div class="dots">${dots}</div></div>`;
+  }
+  for(let i=1;(off+30+i-1)%7!==0;i++)h+=`<div class="d o">${i}</div>`;
+  document.getElementById('cal').innerHTML=h;
+}
+renderCal(false);
+const rs=document.getElementById('reset');
+rs.onclick=()=>{rs.textContent='Cleared';setTimeout(()=>rs.textContent='Reset',1500)};
+</script>
+</body>
+</html>
