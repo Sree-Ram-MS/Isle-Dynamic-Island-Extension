@@ -19,6 +19,7 @@
 mod lyrics;
 mod media;
 mod store;
+mod translit;
 
 use std::ffi::OsStr;
 use std::iter::once;
@@ -128,6 +129,7 @@ const A_ACTIVE_FROM: i32 = 81;
 const A_ACTIVE_UNTIL: i32 = 82;
 const A_EMPTY_SHELF: i32 = 83;
 const A_OPEN_LRCLIB: i32 = 84;
+const A_LYRICS_EN: i32 = 85;
 const S_MINIMIZE: i32 = 102;
 
 // Settings window (Nusa Settings design), in design units (96-dpi pixels).
@@ -197,6 +199,10 @@ struct App {
     thumb_size: i32,
     tracking: bool,
     fonts: Vec<(String, i32, i32, isize)>,
+    // Text drawn during a supersampled paint is queued here and drawn
+    // afterwards straight onto the final pixels, so it stays sharp
+    // (ClearType) instead of being blurred by the 2x downscale.
+    text_ops: Option<Vec<TextOp>>,
     actions: Vec<(RECT, i32, i32)>,
     // pomodoro
     pomo_total: u32,
@@ -290,7 +296,29 @@ fn get_font(name: &str, size: i32, weight: i32) -> HFONT {
     h
 }
 
+struct TextOp {
+    s: String,
+    rect: RECT,
+    font: String,
+    size: i32,
+    weight: i32,
+    color: u32,
+    flags: u32,
+}
+
 unsafe fn draw_text(hdc: HDC, s: &str, x: i32, y: i32, w: i32, h: i32, font_name: &str, size: i32, weight: i32, color: u32, flags: u32) {
+    if let Some(ops) = app().text_ops.as_mut() {
+        ops.push(TextOp {
+            s: s.to_string(),
+            rect: RECT { left: x, top: y, right: x + w, bottom: y + h },
+            font: font_name.to_string(),
+            size,
+            weight,
+            color,
+            flags,
+        });
+        return;
+    }
     let font = get_font(font_name, size, weight);
     let old = SelectObject(hdc, font as HGDIOBJ);
     SetBkMode(hdc, TRANSPARENT as i32);
@@ -609,7 +637,7 @@ fn page_color(p: usize) -> u32 {
     }
 }
 
-const PAGE_NAMES: [&str; PAGES] = ["Music", "Lyrics", "Focus timer", "Water", "Shelf", "To-do"];
+const PAGE_NAMES: [&str; PAGES] = ["Music", "Lyrics", "Pomodoro", "Water", "Shelf", "To-do"];
 // Page icons shown on the bottom dots while hovering them ("" = droplet).
 const PAGE_ICONS: [&str; PAGES] = ["\u{e8d6}", "\u{e8e4}", "\u{e916}", "", "\u{e7b8}", "\u{e73e}"];
 
@@ -685,21 +713,21 @@ unsafe fn draw_indicator(hdc: HDC, cx: i32, cy: i32) {
     match battery() {
         Some((pct, plugged)) => {
             let low = pct <= 20 && !plugged;
-            ring(hdc, cx, cy, 9, 2, pct as f64 / 100.0, cr(31, 58, 40), if low { cr(255, 69, 58) } else { cr(48, 209, 88) });
+            ring(hdc, cx, cy, 7, 2, pct as f64 / 100.0, cr(31, 58, 40), if low { cr(255, 69, 58) } else { cr(48, 209, 88) });
             if plugged {
                 polygon(hdc, &[
-                    POINT { x: cx + 1, y: cy - 6 },
-                    POINT { x: cx - 4, y: cy + 1 },
+                    POINT { x: cx + 1, y: cy - 4 },
+                    POINT { x: cx - 3, y: cy + 1 },
                     POINT { x: cx - 1, y: cy + 1 },
-                    POINT { x: cx - 2, y: cy + 6 },
-                    POINT { x: cx + 4, y: cy - 1 },
+                    POINT { x: cx - 1, y: cy + 4 },
+                    POINT { x: cx + 3, y: cy - 1 },
                     POINT { x: cx + 1, y: cy - 1 },
                 ], cr(48, 209, 88));
             }
         }
         None => {
-            fill_circle(hdc, cx, cy, 6, cr(12, 52, 24));
-            fill_circle(hdc, cx, cy, 4, cr(48, 209, 88));
+            fill_circle(hdc, cx, cy, 5, cr(12, 52, 24));
+            fill_circle(hdc, cx, cy, 3, cr(48, 209, 88));
         }
     }
 }
@@ -710,10 +738,10 @@ unsafe fn draw_clock(hdc: HDC, cx: i32, cy: i32, with_date: bool) {
     let tw = text_width(&t, "Segoe UI", 15, 600, hdc);
     let aw = text_width(&ap, "Segoe UI", 11, 600, hdc);
     let dw = if with_date { 10 + text_width(&date, "Segoe UI", 12, 400, hdc) } else { 0 };
-    let total = 22 + 9 + tw + 2 + aw + dw;
+    let total = 18 + 7 + tw + 2 + aw + dw;
     let x = cx - total / 2;
-    draw_indicator(hdc, x + 11, cy);
-    let mut tx = x + 31;
+    draw_indicator(hdc, x + 9, cy);
+    let mut tx = x + 25;
     draw_text(hdc, &t, tx, cy - 11, tw + 4, 22, "Segoe UI", 15, 600, WHITE, DT_LEFT);
     tx += tw + 2;
     draw_text(hdc, &ap, tx, cy - 9, aw + 4, 20, "Segoe UI", 11, 600, cr(161, 161, 166), DT_LEFT);
@@ -1049,12 +1077,23 @@ unsafe fn paint_music(hdc: HDC, w: i32, _h: i32) {
     };
     btn(hdc, mid - 57, "\u{e892}", 15, 28, A_PREV_TRACK);
     btn(hdc, mid, if m.playing { "\u{e769}" } else { "\u{e768}" }, 20, 34, A_PLAYPAUSE);
-    btn(hdc, mid + 57, "\u{e893}", 15, 28, A_NEXT_TRACK);
+    let show_slider = a.vol_drag || a.hover.0 == A_VOL_MUTE || a.hover.0 == A_VOL_BAR;
+    if !show_slider {
+        btn(hdc, mid + 57, "\u{e893}", 15, 28, A_NEXT_TRACK);
+    }
+    // lyrics button: opens the Lyrics page
+    if a.store.show_lyrics {
+        let lcx = cx0 + 14;
+        if a.hover.0 == A_LYRICS {
+            fill_circle(hdc, lcx, cy, 14, cr(44, 44, 46));
+        }
+        draw_text(hdc, "\u{e8f2}", lcx - 14, cy - 14, 28, 28, "Segoe MDL2 Assets", 15, 400, if m.present { WHITE } else { cr(99, 99, 108) }, DT_CENTER);
+        add_action(lcx - 14, cy - 14, 28, 28, A_LYRICS, 0);
+    }
     // volume: speaker button on the right; the slider slides out on hover
     let (lvl, muted) = (a.vol_level, a.vol_muted);
     let silent = muted || lvl <= 0.0;
     let vx = w - 48 - 14;
-    let show_slider = a.vol_drag || a.hover.0 == A_VOL_MUTE || a.hover.0 == A_VOL_BAR;
     if a.hover.0 == A_VOL_MUTE {
         fill_circle(hdc, vx, cy, 14, cr(44, 44, 46));
     }
@@ -1120,27 +1159,48 @@ unsafe fn paint_lyrics(hdc: HDC, w: i32, _h: i32) {
     }
 }
 
+// Pomodoro in the style Ram picked: a glowing red stopwatch disc on the
+// left; big time + reset, the phase, then Short Break / play / Focus Time.
 unsafe fn paint_pomo(hdc: HDC, w: i32, _h: i32) {
     let a = app();
-    let (rcx, rcy) = (48 + 52, PMID);
-    ring(hdc, rcx, rcy, 46, 7, pomo_frac(), cr(44, 44, 46), cr(255, 159, 10));
-    draw_text(hdc, &fmt_mmss(a.pomo_left as f64), rcx - 50, rcy - 16, 100, 32, "Segoe UI", 24, 600, WHITE, DT_CENTER);
-    let cx0 = 48 + 104 + 18;
-    let cw = w - 48 - cx0;
-    draw_text(hdc, "Pomodoro", cx0, 66, cw, 21, "Segoe UI", 16, 600, WHITE, DT_LEFT);
+    let (dcx, dcy) = (48 + 58, PMID);
+    fill_circle(hdc, dcx, dcy, 58, cr(46, 10, 9));
+    fill_circle(hdc, dcx, dcy, 54, cr(110, 22, 18));
+    fill_circle(hdc, dcx, dcy, 50, cr(255, 82, 72));
+    fill_circle(hdc, dcx, dcy, 43, cr(214, 30, 26));
+    draw_text(hdc, "\u{e916}", dcx - 30, dcy - 30, 60, 60, "Segoe MDL2 Assets", 38, 400, WHITE, DT_CENTER);
+    // right column
+    let rx0 = 48 + 116 + 22;
+    let rcx = (rx0 + w - 48) / 2;
+    let t = fmt_mmss(a.pomo_left as f64);
+    let tw = text_width(&t, "Segoe UI", 40, 700, hdc);
+    let tx = rcx - (tw + 40) / 2;
+    draw_text(hdc, &t, tx, 54, tw + 6, 50, "Segoe UI", 40, 700, WHITE, DT_LEFT);
+    let (bcx, bcy) = (tx + tw + 26, 80);
+    fill_circle(hdc, bcx, bcy, 14, if a.hover.0 == A_POMO_RESET { cr(58, 58, 62) } else { cr(38, 38, 42) });
+    draw_text(hdc, "\u{e777}", bcx - 14, bcy - 14, 28, 28, "Segoe MDL2 Assets", 13, 400, WHITE, DT_CENTER);
+    add_action(bcx - 15, bcy - 15, 30, 30, A_POMO_RESET, 0);
     let label = a.pomo_label.clone();
-    draw_text(hdc, &label, cx0, 87, cw, 17, "Segoe UI", 12, 400, cr(161, 161, 166), DT_LEFT);
-    // phase pills
-    let mut x = cx0;
-    for (name, param, on) in [("Short Break", 5, a.pomo_mode != 0), ("Focus", 25, a.pomo_mode == 0)] {
-        let (bg, fg) = if on { (WHITE, BLACK) } else { (cr(44, 44, 46), WHITE) };
-        x += pill_btn(hdc, x, 112, name, 12, 500, 12, 26, bg, fg, A_POMO_MODE, param) + 6;
-    }
-    // start / pause (+ reset once the timer has moved)
-    let bw = pill_btn(hdc, cx0, 146, if a.pomo_running { "Pause" } else { "Start" }, 13, 600, 16, 29, BLUE, WHITE, A_POMO_PLAY, 0);
-    if a.pomo_left != a.pomo_total {
-        pill_btn(hdc, cx0 + bw + 6, 146, "Reset", 13, 600, 16, 29, cr(44, 44, 46), WHITE, A_POMO_RESET, 0);
-    }
+    draw_text(hdc, &label, rx0, 104, w - 48 - rx0, 20, "Segoe UI", 14, 400, cr(161, 161, 166), DT_CENTER);
+    // buttons
+    let y = 134;
+    let (bw, pw, gap) = (120, 64, 8);
+    let x0 = rcx - (bw * 2 + pw + gap * 2) / 2;
+    let pill = |hdc: HDC, x: i32, wdt: i32, icon: &str, text: &str, on: bool, param: i32| {
+        let hov = app().hover == (A_POMO_MODE, param);
+        let bg = if on { cr(58, 58, 64) } else if hov { cr(48, 48, 52) } else { cr(38, 38, 42) };
+        fill_round(hdc, x, y, wdt, 34, 34, bg);
+        draw_text(hdc, icon, x + 10, y, 22, 34, "Segoe UI Symbol", 13, 400, WHITE, DT_CENTER);
+        draw_text(hdc, text, x + 32, y, wdt - 40, 34, "Segoe UI", 13, 500, cr(232, 232, 236), DT_LEFT);
+        add_action(x, y, wdt, 34, A_POMO_MODE, param);
+    };
+    pill(hdc, x0, bw, "\u{2615}", "Short Break", a.pomo_mode != 0, 5);
+    let px = x0 + bw + gap;
+    let red = if a.hover.0 == A_POMO_PLAY { cr(255, 99, 88) } else { cr(255, 69, 58) };
+    fill_round(hdc, px, y, pw, 34, 34, red);
+    draw_text(hdc, if a.pomo_running { "\u{e769}" } else { "\u{e768}" }, px, y, pw, 34, "Segoe MDL2 Assets", 15, 400, WHITE, DT_CENTER);
+    add_action(px, y, pw, 34, A_POMO_PLAY, 0);
+    pill(hdc, px + pw + gap, bw, "\u{25ce}", "Focus Time", a.pomo_mode == 0, 25);
 }
 
 unsafe fn paint_water(hdc: HDC, w: i32, _h: i32) {
@@ -1480,6 +1540,15 @@ unsafe fn do_action(code: i32, param: i32, x: i32, _y: i32, hwnd: HWND) {
         A_ANIM => {
             a.store.anim_fast = param == 1;
             store::save(&a.store);
+        }
+        A_LYRICS_EN => {
+            a.store.lyrics_english = !a.store.lyrics_english;
+            lyrics::ENGLISH.store(a.store.lyrics_english, std::sync::atomic::Ordering::Relaxed);
+            store::save(&a.store);
+            let m = media::snapshot();
+            if m.present && !m.title.is_empty() {
+                lyrics::refetch(&m.title, &m.artist, m.duration_secs);
+            }
         }
         A_SHOW_LYRICS => {
             a.store.show_lyrics = !a.store.show_lyrics;
@@ -2082,7 +2151,9 @@ unsafe fn paint_settings_window(hdc: HDC, w: i32, h: i32) {
         }
         3 => {
             s_h2(hdc, x0, cw, &mut y, "Lyrics");
-            s_group(hdc, x0, cw, &mut y, &[row("Show lyrics", "From LRCLIB, a community-contributed lyrics database", RowKind::Switch(st.show_lyrics, A_SHOW_LYRICS, true))]);
+            s_group(hdc, x0, cw, &mut y, &[row("Show lyrics", "From LRCLIB, a community-contributed lyrics database", RowKind::Switch(st.show_lyrics, A_SHOW_LYRICS, true)),
+                row("Lyrics in English letters", "Tamil, Malayalam, Hindi and other lyrics written in English letters", RowKind::Switch(st.lyrics_english, A_LYRICS_EN, st.show_lyrics)),
+            ]);
             s_h2(hdc, x0, cw, &mut y, "Minimized notch");
             s_group(hdc, x0, cw, &mut y, &[
                 row("Music in the minimized notch", "A sound wave next to the clock while music plays", RowKind::Switch(st.mini_player, A_MINI_PLAYER, true)),
@@ -2294,7 +2365,9 @@ unsafe fn render_scaled(ref_dc: HDC, dst: HDC, dx: i32, dy: i32, pw: i32, ph: i3
     SetWorldTransform(mem, &xform);
     let prev_k = app().paint_k;
     app().paint_k = (xform.eM11, xform.eM22);
+    let prev_ops = app().text_ops.replace(Vec::new());
     painter(mem);
+    let ops = std::mem::replace(&mut app().text_ops, prev_ops).unwrap_or_default();
     app().paint_k = prev_k;
     // Reset to identity BEFORE StretchBlt: a transform left active on the
     // source DC can be applied to the source rectangle too.
@@ -2302,6 +2375,25 @@ unsafe fn render_scaled(ref_dc: HDC, dst: HDC, dx: i32, dy: i32, pw: i32, ph: i3
     SetStretchBltMode(dst, HALFTONE);
     SetBrushOrgEx(dst, 0, 0, null_mut());
     StretchBlt(dst, dx, dy, pw, ph, mem, 0, 0, pw * SS, ph * SS, SRCCOPY);
+    // sharp text, drawn at the real pixel size
+    if !ops.is_empty() {
+        let old_mode = SetGraphicsMode(dst, GM_ADVANCED);
+        let tx = XFORM {
+            eM11: pw as f32 / dw as f32,
+            eM12: 0.0,
+            eM21: 0.0,
+            eM22: ph as f32 / dh as f32,
+            eDx: dx as f32,
+            eDy: dy as f32,
+        };
+        SetWorldTransform(dst, &tx);
+        for op in &ops {
+            let r = op.rect;
+            draw_text(dst, &op.s, r.left, r.top, r.right - r.left, r.bottom - r.top, &op.font, op.size, op.weight, op.color, op.flags);
+        }
+        ModifyWorldTransform(dst, null(), MWT_IDENTITY);
+        SetGraphicsMode(dst, old_mode);
+    }
     SelectObject(mem, old);
     DeleteObject(bmp as HGDIOBJ);
     DeleteDC(mem);
@@ -2751,6 +2843,7 @@ fn main() {
             store::save(&st);
         }
         let shelf_items = build_shelf_items(&st);
+        lyrics::ENGLISH.store(st.lyrics_english, std::sync::atomic::Ordering::Relaxed);
         *(&raw mut APP) = Some(App {
             hwnd: null_mut(),
             expanded: false,
@@ -2780,6 +2873,7 @@ fn main() {
             thumb_size: 0,
             tracking: false,
             fonts: Vec::new(),
+            text_ops: None,
             actions: Vec::new(),
             pomo_total: (st.pomo_focus * 60) as u32,
             pomo_left: (st.pomo_focus * 60) as u32,
