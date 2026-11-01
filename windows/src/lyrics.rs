@@ -3,7 +3,7 @@
 // with the closest-duration synced result winning. Runs on a short-lived
 // thread per track; results land in a shared snapshot the UI reads.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 #[derive(Clone, PartialEq)]
@@ -17,8 +17,18 @@ pub enum LyricsState {
 pub static LYRICS: Mutex<LyricsState> = Mutex::new(LyricsState::Idle);
 pub static LYRICS_FOR: Mutex<String> = Mutex::new(String::new()); // "title\0artist" key
 
+/// Show lyrics in English letters: prefer an LRCLIB version written in
+/// Latin script, and transliterate Tamil / Malayalam / Hindi / ... lines.
+pub static ENGLISH: AtomicBool = AtomicBool::new(true);
+
 pub fn state() -> LyricsState {
-    LYRICS.lock().map(|l| l.clone()).unwrap_or(LyricsState::Idle)
+    let st = LYRICS.lock().map(|l| l.clone()).unwrap_or(LyricsState::Idle);
+    match st {
+        LyricsState::Ready(lines) if ENGLISH.load(Ordering::Relaxed) => {
+            LyricsState::Ready(lines.into_iter().map(|(t, l)| (t, crate::translit::to_latin(&l))).collect())
+        }
+        other => other,
+    }
 }
 
 fn url_encode(s: &str) -> String {
@@ -283,7 +293,12 @@ fn best_field(body: &str, key: &str, duration_secs: f64) -> Option<(String, f64)
             }
         };
         if !value.trim().is_empty() {
-            let diff = if duration_secs > 0.0 { (dur - duration_secs).abs() } else { 9999.0 };
+            let mut diff = if duration_secs > 0.0 { (dur - duration_secs).abs() } else { 9999.0 };
+            // English letters wanted: a Latin-script version wins over the
+            // original script whenever LRCLIB has one
+            if ENGLISH.load(Ordering::Relaxed) && crate::translit::has_indic(&value) {
+                diff += 100_000.0;
+            }
             if best.as_ref().map(|(d, _, _)| diff < *d).unwrap_or(true) {
                 best = Some((diff, value, dur));
             }

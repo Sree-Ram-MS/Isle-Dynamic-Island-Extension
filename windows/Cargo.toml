@@ -1,6 +1,6 @@
 [package]
 name = "isle"
-version = "0.2.2"
+version = "0.6.0"
 edition = "2021"
 description = "Isle - a living notch for Windows, native Rust (no web engine)"
 license = "MIT"
@@ -15,6 +15,12 @@ windows = { version = "0.58", features = [
   "Win32_Media_Audio",
   "Win32_Media_Audio_Endpoints",
   "Win32_Foundation",
+  "Foundation_Numerics",
+  "Win32_Graphics_Gdi",
+  "Win32_Graphics_Direct2D",
+  "Win32_Graphics_Direct2D_Common",
+  "Win32_Graphics_DirectWrite",
+  "Win32_Graphics_Dxgi_Common",
 ] }
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
@@ -25,10 +31,12 @@ windows-sys = { version = "0.59", features = [
   "Win32_System_LibraryLoader",
   "Win32_System_SystemInformation",
   "Win32_System_Registry",
+  "Win32_System_Power",
   "Win32_System_Diagnostics_Debug",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_Networking_WinHttp",
   "Win32_UI_HiDpi",
+  "Win32_Graphics_Dwm",
 ] }
 
 [profile.release]
