@@ -42,6 +42,8 @@ pub struct Store {
     pub page_icons: bool,
     /// Faster open / close animation.
     pub anim_fast: bool,
+    /// Soft green glow around the notch.
+    pub glow: bool,
     /// Lyrics button, Lyrics page and lyric fetching.
     pub show_lyrics: bool,
     /// Lyrics in English letters (transliterated) instead of the original script.
@@ -79,6 +81,7 @@ pub fn load() -> Store {
     st.page_icons = true;
     st.show_lyrics = true;
     st.lyrics_english = true;
+    st.glow = true;
     st.pomo_focus = 25;
     st.pomo_short = 5;
     st.pomo_long = 15;
@@ -116,6 +119,7 @@ pub fn load() -> Store {
                     "open_click" => st.open_click = v != "0",
                     "page_icons" => st.page_icons = v != "0",
                     "anim_fast" => st.anim_fast = v != "0",
+                    "glow" => st.glow = v != "0",
                     "show_lyrics" => st.show_lyrics = v != "0",
                     "lyrics_english" => st.lyrics_english = v != "0",
                     "pomo_focus" => st.pomo_focus = v.parse().unwrap_or(25).clamp(5, 90),
@@ -161,8 +165,8 @@ pub fn save(st: &Store) {
     out.push_str(&format!("mini_lyrics={}\n", if st.mini_lyrics { 1 } else { 0 }));
     out.push_str(&format!("reminders={}\n", if st.reminders { 1 } else { 0 }));
     let b = |x: bool| if x { 1 } else { 0 };
-    out.push_str(&format!("monitor={}\ntiny_tab={}\nopen_click={}\npage_icons={}\nanim_fast={}\nshow_lyrics={}\nlyrics_english={}\n",
-        st.monitor, b(st.tiny_tab), b(st.open_click), b(st.page_icons), b(st.anim_fast), b(st.show_lyrics), b(st.lyrics_english)));
+    out.push_str(&format!("monitor={}\ntiny_tab={}\nopen_click={}\npage_icons={}\nanim_fast={}\nshow_lyrics={}\nlyrics_english={}\nglow={}\n",
+        st.monitor, b(st.tiny_tab), b(st.open_click), b(st.page_icons), b(st.anim_fast), b(st.show_lyrics), b(st.lyrics_english), b(st.glow)));
     out.push_str(&format!("pomo_focus={}\npomo_short={}\npomo_long={}\n", st.pomo_focus, st.pomo_short, st.pomo_long));
     out.push_str(&format!("water_goal={}\ndrink_ml={}\nactive_from={}\nactive_until={}\nempty_shelf={}\n",
         st.water_goal, st.drink_ml, st.active_from, st.active_until, b(st.empty_shelf)));

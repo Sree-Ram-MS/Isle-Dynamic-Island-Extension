@@ -1,4 +1,4 @@
-// Isle for Windows — native Rust v0.5.0
+// Isle for Windows — native Rust v0.6.0
 // The full app on the spike's skeleton: one top-edge window, one UI thread,
 // GDI drawing (double-buffered), real functionality per page:
 //   Music    — WinRT GSMTC (media.rs) + LRCLIB synced lyrics split-pane
@@ -13,11 +13,15 @@
 // v0.5.0: the notch follows the "Nusa Notch" design — a floating pill with
 // clock + battery ring (or the live lyric line), opening into a rounded card
 // with six pages: Music, Lyrics, Focus timer, Water, Shelf, To-do.
+// v0.6.0: drawing moved from GDI to Direct2D + DirectWrite (gfx.rs) and the
+// notch became a per-pixel-alpha layered window: anti-aliased corners and
+// text like the HTML design, plus a soft green glow around the notch.
 
 #![windows_subsystem = "windows"]
 
 mod lyrics;
 mod media;
+mod gfx;
 mod store;
 mod translit;
 
@@ -130,6 +134,8 @@ const A_ACTIVE_UNTIL: i32 = 82;
 const A_EMPTY_SHELF: i32 = 83;
 const A_OPEN_LRCLIB: i32 = 84;
 const A_LYRICS_EN: i32 = 85;
+const A_GLOW: i32 = 86;
+const A_WATER_SETTINGS: i32 = 87;
 const S_MINIMIZE: i32 = 102;
 
 // Settings window (Nusa Settings design), in design units (96-dpi pixels).
@@ -172,8 +178,12 @@ struct App {
     // pointer over this action (code, param): hover looks in the notch
     hover: (i32, i32),
     seek_bar: (i32, i32),
-    // design -> device pixel scale of the paint in progress (for clipping)
-    paint_k: (f32, f32),
+    // where the notch sits in its layered window: (left, top) pixels and
+    // the design -> pixel scale, for mapping the pointer
+    notch_off: (i32, i32),
+    notch_k: f32,
+    win_pos: (i32, i32),
+    presenting: bool,
     // "Charging" popup in the minimized notch
     alert_until: u64,
     last_ac: i8,
@@ -194,15 +204,8 @@ struct App {
     open_from: f32,
     open_to: f32,
     wave_on: bool,
-    thumb_gen: u64,
-    thumb_bmp: HBITMAP,
-    thumb_size: i32,
     tracking: bool,
     fonts: Vec<(String, i32, i32, isize)>,
-    // Text drawn during a supersampled paint is queued here and drawn
-    // afterwards straight onto the final pixels, so it stays sharp
-    // (ClearType) instead of being blurred by the 2x downscale.
-    text_ops: Option<Vec<TextOp>>,
     actions: Vec<(RECT, i32, i32)>,
     // pomodoro
     pomo_total: u32,
@@ -296,95 +299,31 @@ fn get_font(name: &str, size: i32, weight: i32) -> HFONT {
     h
 }
 
-struct TextOp {
-    s: String,
-    rect: RECT,
-    font: String,
-    size: i32,
-    weight: i32,
-    color: u32,
-    flags: u32,
+unsafe fn draw_text(_hdc: HDC, s: &str, x: i32, y: i32, w: i32, h: i32, font_name: &str, size: i32, weight: i32, color: u32, flags: u32) {
+    let align = if flags & DT_CENTER != 0 { 1 } else if flags & DT_RIGHT != 0 { 2 } else { 0 };
+    gfx::text(s, x as f32, y as f32, w as f32, h as f32, font_name, size, weight, color, 1.0, align, flags & DT_END_ELLIPSIS != 0);
 }
 
-unsafe fn draw_text(hdc: HDC, s: &str, x: i32, y: i32, w: i32, h: i32, font_name: &str, size: i32, weight: i32, color: u32, flags: u32) {
-    if let Some(ops) = app().text_ops.as_mut() {
-        ops.push(TextOp {
-            s: s.to_string(),
-            rect: RECT { left: x, top: y, right: x + w, bottom: y + h },
-            font: font_name.to_string(),
-            size,
-            weight,
-            color,
-            flags,
-        });
-        return;
-    }
-    let font = get_font(font_name, size, weight);
-    let old = SelectObject(hdc, font as HGDIOBJ);
-    SetBkMode(hdc, TRANSPARENT as i32);
-    SetTextColor(hdc, color);
-    let mut rect = RECT { left: x, top: y, right: x + w, bottom: y + h };
-    let mut ws = wide(s);
-    DrawTextW(hdc, ws.as_mut_ptr(), -1, &mut rect, flags | DT_SINGLELINE | DT_VCENTER);
-    SelectObject(hdc, old);
+unsafe fn text_width(s: &str, font_name: &str, size: i32, weight: i32, _hdc: HDC) -> i32 {
+    gfx::text_width(s, font_name, size, weight).ceil() as i32
 }
 
-unsafe fn text_width(s: &str, font_name: &str, size: i32, weight: i32, hdc: HDC) -> i32 {
-    let font = get_font(font_name, size, weight);
-    let old = SelectObject(hdc, font as HGDIOBJ);
-    let mut sz: windows_sys::Win32::Foundation::SIZE = std::mem::zeroed();
-    let ws = wide(s);
-    GetTextExtentPoint32W(hdc, ws.as_ptr(), (ws.len() - 1) as i32, &mut sz);
-    SelectObject(hdc, old);
-    sz.cx
+unsafe fn fill_rect_c(_hdc: HDC, x: i32, y: i32, w: i32, h: i32, color: u32) {
+    gfx::fill_rect(x as f32, y as f32, w as f32, h as f32, color, 1.0);
 }
 
-unsafe fn fill_rect_c(hdc: HDC, x: i32, y: i32, w: i32, h: i32, color: u32) {
-    let brush = CreateSolidBrush(color);
-    let r = RECT { left: x, top: y, right: x + w, bottom: y + h };
-    FillRect(hdc, &r, brush);
-    DeleteObject(brush as HGDIOBJ);
+// `rad` is the corner's diameter (GDI RoundRect convention used across the
+// layout code), so a pill passes its height.
+unsafe fn fill_round(_hdc: HDC, x: i32, y: i32, w: i32, h: i32, rad: i32, color: u32) {
+    gfx::fill_round(x as f32, y as f32, w as f32, h as f32, rad as f32 / 2.0, color, 1.0);
 }
 
-unsafe fn fill_round(hdc: HDC, x: i32, y: i32, w: i32, h: i32, rad: i32, color: u32) {
-    let brush = CreateSolidBrush(color);
-    let pen = CreatePen(PS_NULL as i32, 0, 0);
-    let ob = SelectObject(hdc, brush as HGDIOBJ);
-    let op = SelectObject(hdc, pen as HGDIOBJ);
-    RoundRect(hdc, x, y, x + w, y + h, rad, rad);
-    SelectObject(hdc, ob);
-    SelectObject(hdc, op);
-    DeleteObject(brush as HGDIOBJ);
-    DeleteObject(pen as HGDIOBJ);
+unsafe fn fill_circle(_hdc: HDC, cx: i32, cy: i32, r: i32, color: u32) {
+    gfx::fill_circle(cx as f32, cy as f32, r as f32, color, 1.0);
 }
 
-unsafe fn fill_circle(hdc: HDC, cx: i32, cy: i32, r: i32, color: u32) {
-    let brush = CreateSolidBrush(color);
-    let pen = CreatePen(PS_NULL as i32, 0, 0);
-    let ob = SelectObject(hdc, brush as HGDIOBJ);
-    let op = SelectObject(hdc, pen as HGDIOBJ);
-    Ellipse(hdc, cx - r, cy - r, cx + r, cy + r);
-    SelectObject(hdc, ob);
-    SelectObject(hdc, op);
-    DeleteObject(brush as HGDIOBJ);
-    DeleteObject(pen as HGDIOBJ);
-}
-
-unsafe fn draw_arc(hdc: HDC, cx: i32, cy: i32, r: i32, from_deg: f64, sweep_deg: f64, width: i32, color: u32) {
-    if sweep_deg <= 0.0 {
-        return;
-    }
-    let pen = CreatePen(PS_SOLID as i32, width, color);
-    let op = SelectObject(hdc, pen as HGDIOBJ);
-    let steps = (sweep_deg as i32).max(2);
-    for i in 0..steps {
-        let a1 = (from_deg + sweep_deg * i as f64 / steps as f64).to_radians();
-        let a2 = (from_deg + sweep_deg * (i + 1) as f64 / steps as f64).to_radians();
-        MoveToEx(hdc, cx + (r as f64 * a1.cos()) as i32, cy + (r as f64 * a1.sin()) as i32, null_mut());
-        LineTo(hdc, cx + (r as f64 * a2.cos()) as i32, cy + (r as f64 * a2.sin()) as i32);
-    }
-    SelectObject(hdc, op);
-    DeleteObject(pen as HGDIOBJ);
+unsafe fn draw_arc(_hdc: HDC, cx: i32, cy: i32, r: i32, from_deg: f64, sweep_deg: f64, width: i32, color: u32) {
+    gfx::arc(cx as f32, cy as f32, r as f32, from_deg as f32, sweep_deg as f32, width as f32, color, 1.0);
 }
 
 fn add_action(x: i32, y: i32, w: i32, h: i32, code: i32, param: i32) {
@@ -400,12 +339,13 @@ fn add_action(x: i32, y: i32, w: i32, h: i32, code: i32, param: i32) {
 // ---------- sizing ----------
 fn collapsed_size() -> (i32, i32) {
     // Design units (Nusa Notch design): a floating pill.
+    // small by default; wider only for the timer ring or the lyric line
     match mini_mode() {
         Mini::Alert => (330, 62),
         Mini::Tab => (120, 16),
         Mini::Lyric => (360, 34),
-        Mini::Wide => (240, 34),
-        Mini::Clock => (176, 34),
+        Mini::Wide => if app().store.mini_player && music_playing() { (214, 34) } else { (186, 34) },
+        Mini::Clock => if app().store.mini_player && music_playing() { (168, 34) } else { (140, 34) },
     }
 }
 
@@ -462,12 +402,6 @@ fn cur_size() -> (i32, i32) {
 fn collapsed_radius() -> i32 {
     let (_, h) = px_of(collapsed_size(), expanded_scale());
     h / 2
-}
-
-// The notch floats just below the top edge, rounded on every corner.
-unsafe fn apply_region(hwnd: HWND, w: i32, h: i32, rad: i32) {
-    let round = CreateRoundRectRgn(0, 0, w + 1, h + 1, rad * 2, rad * 2);
-    SetWindowRgn(hwnd, round, 1);
 }
 
 fn expanded_radius() -> i32 {
@@ -527,9 +461,20 @@ fn notch_monitor() -> RECT {
     unsafe { RECT { left: 0, top: 0, right: GetSystemMetrics(SM_CXSCREEN), bottom: GetSystemMetrics(SM_CYSCREEN) } }
 }
 
-unsafe fn place_window(hwnd: HWND, w: i32, h: i32) {
-    let m = notch_monitor();
-    SetWindowPos(hwnd, HWND_TOPMOST, m.left + (m.right - m.left - w) / 2, m.top + top_gap(), w, h, SWP_NOACTIVATE);
+// Glow margin around the notch (design units).
+const GLOW: i32 = 16;
+
+unsafe fn place_window(_hwnd: HWND, _w: i32, _h: i32) {
+    present();
+}
+
+// Repaint: the notch through UpdateLayeredWindow, other windows normally.
+unsafe fn inval(h: HWND) {
+    if h == app().hwnd {
+        present();
+    } else {
+        InvalidateRect(h, null(), 0);
+    }
 }
 
 // Move the notch towards the size of its current state. Size changes
@@ -540,9 +485,7 @@ unsafe fn apply_size(hwnd: HWND) {
     let open_to = if a.expanded { 1.0 } else { 0.0 };
     if target == a.cur_px && !a.animating {
         a.open_level = open_to;
-        let rad = if a.expanded { expanded_radius() } else { collapsed_radius() };
-        apply_region(hwnd, target.0, target.1, rad);
-        InvalidateRect(hwnd, null(), 0);
+        present();
         return;
     }
     a.anim_from = a.cur_px;
@@ -572,21 +515,116 @@ unsafe fn anim_step(hwnd: HWND) {
     let w = lerp_i(a.anim_from.0, a.anim_to.0, e_size).max(8);
     let h = lerp_i(a.anim_from.1, a.anim_to.1, e_size).max(4);
     a.open_level = a.open_from + (a.open_to - a.open_from) * e_open;
-    let rad = lerp_i(collapsed_radius(), expanded_radius(), a.open_level);
-    place_window(hwnd, w, h);
-    apply_region(hwnd, w, h, rad);
     a.cur_px = (w, h);
     if t >= 1.0 {
         a.animating = false;
         a.cur_px = a.anim_to;
         a.open_level = a.open_to;
         KillTimer(hwnd, TIMER_ANIM);
-        place_window(hwnd, a.cur_px.0, a.cur_px.1);
-        let rad = if a.expanded { expanded_radius() } else { collapsed_radius() };
-        apply_region(hwnd, a.cur_px.0, a.cur_px.1, rad);
     }
-    InvalidateRect(hwnd, null(), 0);
-    UpdateWindow(hwnd);
+    present();
+}
+
+// Draw the notch (glow, black rounded shape, the current look or the two
+// looks cross-fading mid-animation) into a premultiplied-alpha bitmap and
+// hand it to the layered window. Everything is anti-aliased by Direct2D.
+unsafe fn present() {
+    let a = app();
+    if a.hwnd.is_null() || a.presenting {
+        return;
+    }
+    a.presenting = true;
+    let sc = expanded_scale() as f32 / 100.0;
+    let (w, h) = a.cur_px;
+    let g = (GLOW as f32 * sc).ceil() as i32;
+    let gap = top_gap();
+    let (ww, wh) = (w + 2 * g, gap + h + g);
+    let m = notch_monitor();
+    let (wx, wy) = (m.left + (m.right - m.left - ww) / 2, m.top);
+    let screen = GetDC(null_mut());
+    let mem = CreateCompatibleDC(screen);
+    let mut bi: BITMAPINFO = std::mem::zeroed();
+    bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+    bi.bmiHeader.biWidth = ww;
+    bi.bmiHeader.biHeight = -wh;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    let mut bits: *mut core::ffi::c_void = null_mut();
+    let dib = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+    let old = SelectObject(mem, dib as HGDIOBJ);
+    if !dib.is_null() && gfx::begin(mem as _, ww, wh) {
+        let (nx, ny) = (g as f32, gap as f32);
+        let rad = if a.animating {
+            lerp_i(collapsed_radius(), expanded_radius(), a.open_level.clamp(0.0, 1.0)) as f32
+        } else if a.expanded {
+            expanded_radius() as f32
+        } else {
+            collapsed_radius() as f32
+        };
+        let (wf, hf) = (w as f32, h as f32);
+        // soft green glow: stacked translucent outlines fading outwards
+        if a.store.glow {
+            for i in (1..=g).rev() {
+                let t = i as f32 / g as f32;
+                let alpha = 0.07 * (1.0 - t) * (1.0 - t) + 0.004;
+                let fi = i as f32;
+                gfx::fill_round(nx - fi, ny - fi, wf + 2.0 * fi, hf + 2.0 * fi, rad + fi, cr(48, 209, 88), alpha);
+            }
+        }
+        gfx::fill_round(nx, ny, wf, hf, rad, BLACK, 1.0);
+        gfx::push_round_clip(nx, ny, wf, hf, rad);
+        if !a.animating {
+            let (dw, dh) = cur_design();
+            let exp = a.expanded;
+            gfx::transform(wf / dw as f32, hf / dh as f32, nx, ny);
+            paint(mem as _, dw, dh, exp);
+        } else {
+            // the minimized look fades out early and the opened page fades
+            // in late (or the reverse when closing), so nothing stretches
+            let open = a.open_level.clamp(0.0, 1.0);
+            let looks = [
+                (false, if open < 0.35 { 1.0 - open / 0.35 } else { 0.0 }),
+                (true, if open > 0.3 { ((open - 0.3) / 0.7).clamp(0.0, 1.0) } else { 0.0 }),
+            ];
+            for (exp, alpha) in looks {
+                if alpha <= 0.0 {
+                    continue;
+                }
+                let (dw, dh) = if exp { expanded_size() } else { collapsed_size() };
+                let (fw, _) = px_of((dw, dh), expanded_scale());
+                gfx::transform(1.0, 1.0, 0.0, 0.0);
+                gfx::push_opacity(alpha);
+                gfx::transform(sc, sc, nx + (w - fw) as f32 / 2.0, ny);
+                paint(mem as _, dw, dh, exp);
+                gfx::transform(1.0, 1.0, 0.0, 0.0);
+                gfx::pop();
+            }
+        }
+        gfx::end();
+        let pos = POINT { x: wx, y: wy };
+        let size = windows_sys::Win32::Foundation::SIZE { cx: ww, cy: wh };
+        let src = POINT { x: 0, y: 0 };
+        let bf = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
+        UpdateLayeredWindow(a.hwnd, screen, &pos, &size, mem, &src, 0, &bf, ULW_ALPHA);
+        a.notch_off = (g, gap);
+        a.notch_k = wf / cur_design().0 as f32;
+        a.win_pos = (wx, wy);
+    }
+    SelectObject(mem, old);
+    if !dib.is_null() {
+        DeleteObject(dib as HGDIOBJ);
+    }
+    DeleteDC(mem);
+    ReleaseDC(null_mut(), screen);
+    a.presenting = false;
+}
+
+// Is this client pixel on the notch itself (not its glow)?
+fn in_notch(px: i32, py: i32) -> bool {
+    let a = app();
+    let (ox, oy) = a.notch_off;
+    px >= ox && px < ox + a.cur_px.0 && py >= oy && py < oy + a.cur_px.1
 }
 
 // ---------- painting ----------
@@ -655,44 +693,25 @@ fn mix(a: u32, b: u32, t: f64) -> u32 {
 
 // Clip the following drawing to a rounded rectangle (design units). GDI
 // clip regions are in device pixels, so the current paint scale is used.
-unsafe fn clip_round(hdc: HDC, x: i32, y: i32, w: i32, h: i32, rad: i32) {
-    let (kx, ky) = app().paint_k;
-    let r = CreateRoundRectRgn(
-        (x as f32 * kx) as i32,
-        (y as f32 * ky) as i32,
-        ((x + w) as f32 * kx) as i32 + 1,
-        ((y + h) as f32 * ky) as i32 + 1,
-        (rad as f32 * 2.0 * kx) as i32,
-        (rad as f32 * 2.0 * ky) as i32,
-    );
-    SelectClipRgn(hdc, r);
-    DeleteObject(r as HGDIOBJ);
+unsafe fn clip_round(_hdc: HDC, x: i32, y: i32, w: i32, h: i32, rad: i32) {
+    gfx::push_round_clip(x as f32, y as f32, w as f32, h as f32, rad as f32);
 }
 
-unsafe fn unclip(hdc: HDC) {
-    SelectClipRgn(hdc, null_mut());
+unsafe fn unclip(_hdc: HDC) {
+    gfx::pop();
 }
 
-unsafe fn polygon(hdc: HDC, pts: &[POINT], col: u32) {
-    let brush = CreateSolidBrush(col);
-    let pen = CreatePen(PS_NULL as i32, 0, 0);
-    let ob = SelectObject(hdc, brush as HGDIOBJ);
-    let op = SelectObject(hdc, pen as HGDIOBJ);
-    Polygon(hdc, pts.as_ptr(), pts.len() as i32);
-    SelectObject(hdc, ob);
-    SelectObject(hdc, op);
-    DeleteObject(brush as HGDIOBJ);
-    DeleteObject(pen as HGDIOBJ);
+fn pts_f(pts: &[POINT]) -> Vec<(f32, f32)> {
+    pts.iter().map(|p| (p.x as f32, p.y as f32)).collect()
+}
+
+unsafe fn polygon(_hdc: HDC, pts: &[POINT], col: u32) {
+    gfx::polygon(&pts_f(pts), col, 1.0);
 }
 
 // Stroked polyline with round caps (chevrons, check marks).
-unsafe fn stroke(hdc: HDC, pts: &[POINT], width: i32, col: u32) {
-    let lb = LOGBRUSH { lbStyle: BS_SOLID, lbColor: col, lbHatch: 0 };
-    let pen = ExtCreatePen((PS_GEOMETRIC | PS_SOLID | PS_ENDCAP_ROUND | PS_JOIN_ROUND) as u32, width as u32, &lb, 0, null());
-    let op = SelectObject(hdc, pen as HGDIOBJ);
-    Polyline(hdc, pts.as_ptr(), pts.len() as i32);
-    SelectObject(hdc, op);
-    DeleteObject(pen as HGDIOBJ);
+unsafe fn stroke(_hdc: HDC, pts: &[POINT], width: i32, col: u32) {
+    gfx::polyline(&pts_f(pts), width as f32, col, 1.0);
 }
 
 unsafe fn draw_droplet(hdc: HDC, dx: i32, dy: i32, col: u32) {
@@ -759,8 +778,8 @@ unsafe fn draw_wave(hdc: HDC, x: i32, cy: i32) {
     for i in 0..4 {
         let ph = ((t + offs[i]) / periods[i]) * std::f64::consts::TAU;
         let k = 0.5 - 0.5 * ph.cos();
-        let bh = (4.0 + 11.0 * k) as i32;
-        fill_round(hdc, x + i as i32 * 5, cy - bh / 2, 3, bh, 3, cr(255, 55, 95));
+        let bh = 4.0 + 11.0 * k as f32;
+        gfx::fill_round((x + i as i32 * 5) as f32, cy as f32 - bh / 2.0, 3.0, bh, 1.5, cr(255, 55, 95), 1.0);
     }
 }
 
@@ -779,7 +798,13 @@ unsafe fn paint(hdc: HDC, w: i32, h: i32, expanded: bool) {
     let a = app();
     let page = a.page;
     // header: page name / clock + date
-    draw_text(hdc, PAGE_NAMES[page], 24, 0, 160, 44, "Segoe UI", 14, 700, page_color(page), DT_LEFT);
+    if page == 3 {
+        let ww = text_width("Water ", "Segoe UI", 15, 700, hdc);
+        draw_text(hdc, "Water ", 24, 0, ww + 2, 44, "Segoe UI", 15, 700, WHITE, DT_LEFT);
+        draw_text(hdc, "Reminder", 24 + ww, 0, 120, 44, "Segoe UI", 15, 700, BLUE, DT_LEFT);
+    } else {
+        draw_text(hdc, PAGE_NAMES[page], 24, 0, 160, 44, "Segoe UI", 15, 700, page_color(page), DT_LEFT);
+    }
     draw_clock(hdc, w / 2, 22, true);
     // page
     match page {
@@ -876,8 +901,11 @@ fn mini_mode() -> Mini {
     if mini_lyric_line().is_some() {
         return Mini::Lyric;
     }
-    if playing || a.pomo_running {
+    if a.pomo_running {
         return Mini::Wide;
+    }
+    if playing {
+        return Mini::Clock;
     }
     if a.store.tiny_tab {
         return Mini::Tab;
@@ -886,7 +914,7 @@ fn mini_mode() -> Mini {
 }
 
 fn mini_active() -> bool {
-    matches!(mini_mode(), Mini::Lyric | Mini::Wide)
+    matches!(mini_mode(), Mini::Lyric | Mini::Wide) || (app().store.mini_player && music_playing())
 }
 
 unsafe fn paint_collapsed(hdc: HDC, w: i32, h: i32) {
@@ -913,18 +941,22 @@ unsafe fn paint_collapsed(hdc: HDC, w: i32, h: i32) {
             fill_circle(hdc, w / 2, cy, 3, cr(48, 209, 88));
         }
         mode => {
-            if a.pomo_running {
-                ring(hdc, 24, cy, 8, 3, pomo_frac(), cr(58, 42, 16), cr(255, 159, 10));
+            let ring_on = a.pomo_running && mode != Mini::Lyric;
+            let wave_on = a.store.mini_player && music_playing();
+            if ring_on {
+                ring(hdc, 22, cy, 8, 3, pomo_frac(), cr(58, 42, 16), cr(255, 159, 10));
             }
-            if a.store.mini_player && music_playing() {
-                draw_wave(hdc, w - 14 - 18, cy);
+            if wave_on {
+                draw_wave(hdc, w - 16 - 18, cy);
             }
             if mode == Mini::Lyric {
                 let line = mini_lyric_line().unwrap_or_default();
                 let text = if line == "\u{266a}" { line } else { format!("\u{266a}  {}", line) };
                 draw_text(hdc, &text, (w - 240) / 2, 0, 240, h, "Segoe UI", 13, 500, WHITE, DT_CENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
             } else {
-                draw_clock(hdc, w / 2, cy, false);
+                let l = if ring_on { 36 } else { 0 };
+                let r = if wave_on { 34 } else { 0 };
+                draw_clock(hdc, (l + w - r) / 2, cy, false);
             }
         }
     }
@@ -947,73 +979,31 @@ fn live_lyric(m: &media::MediaInfo) -> Option<String> {
     None
 }
 
-// GDI bitmap for the current album art, rebuilt only when the decoded
-// thumbnail changes. Returns (bitmap, pixel size) or None when there's no art.
-unsafe fn thumb_bitmap(hdc: HDC) -> Option<(HBITMAP, i32)> {
-    let a = app();
-    let t = media::THUMB.lock().ok()?;
-    if t.gen != a.thumb_gen {
-        if !a.thumb_bmp.is_null() {
-            DeleteObject(a.thumb_bmp as HGDIOBJ);
-            a.thumb_bmp = null_mut();
-        }
-        a.thumb_gen = t.gen;
-        a.thumb_size = t.size;
-        let need = (t.size.max(0) as usize) * (t.size.max(0) as usize) * 4;
-        if t.size > 0 && t.bgra.len() >= need {
-            let mut bi: BITMAPINFO = std::mem::zeroed();
-            bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-            bi.bmiHeader.biWidth = t.size;
-            bi.bmiHeader.biHeight = -t.size; // top-down
-            bi.bmiHeader.biPlanes = 1;
-            bi.bmiHeader.biBitCount = 32;
-            bi.bmiHeader.biCompression = BI_RGB;
-            let mut bits: *mut core::ffi::c_void = null_mut();
-            let bmp = CreateDIBSection(hdc, &bi, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
-            if !bmp.is_null() && !bits.is_null() {
-                std::ptr::copy_nonoverlapping(t.bgra.as_ptr(), bits as *mut u8, need);
-                a.thumb_bmp = bmp;
-            } else if !bmp.is_null() {
-                DeleteObject(bmp as HGDIOBJ);
-            }
-        }
-    }
-    if a.thumb_bmp.is_null() {
-        None
-    } else {
-        Some((a.thumb_bmp, a.thumb_size))
-    }
-}
-
 // Album art with rounded corners: the real thumbnail when the media session
 // has one, otherwise the design's peach -> lilac -> sky gradient with a note.
 unsafe fn draw_art(hdc: HDC, x: i32, y: i32, size: i32, rad: i32, note: bool) {
     clip_round(hdc, x, y, size, size, rad);
-    if let Some((bmp, bsize)) = thumb_bitmap(hdc) {
-        let src = CreateCompatibleDC(hdc);
-        let old = SelectObject(src, bmp as HGDIOBJ);
-        SetStretchBltMode(hdc, HALFTONE);
-        SetBrushOrgEx(hdc, 0, 0, null_mut());
-        StretchBlt(hdc, x, y, size, size, src, 0, 0, bsize, bsize, SRCCOPY);
-        SelectObject(src, old);
-        DeleteDC(src);
+    let drawn = match media::THUMB.lock() {
+        Ok(t) if t.size > 0 && !t.bgra.is_empty() => {
+            gfx::image(t.gen, t.size, &t.bgra, x as f32, y as f32, size as f32, size as f32);
+            true
+        }
+        _ => false,
+    };
+    if drawn {
         unclip(hdc);
         return;
     }
     // 135deg gradient as diagonal bands
     let (c1, c2, c3) = (cr(255, 154, 139), cr(161, 140, 209), cr(90, 200, 250));
-    let n = 28;
+    let n = 40;
     for i in 0..n {
         let t = (i as f64 + 0.5) / n as f64;
         let col = if t < 0.6 { mix(c1, c2, t / 0.6) } else { mix(c2, c3, (t - 0.6) / 0.4) };
-        let d0 = 2 * size * i / n;
-        let d1 = 2 * size * (i + 1) / n + 1;
-        polygon(hdc, &[
-            POINT { x: x + d0, y },
-            POINT { x: x + d1, y },
-            POINT { x, y: y + d1 },
-            POINT { x, y: y + d0 },
-        ], col);
+        let d0 = 2.0 * size as f32 * i as f32 / n as f32;
+        let d1 = 2.0 * size as f32 * (i + 1) as f32 / n as f32 + 0.8;
+        let (xf, yf) = (x as f32, y as f32);
+        gfx::polygon(&[(xf + d0, yf), (xf + d1, yf), (xf, yf + d1), (xf, yf + d0)], col, 1.0);
     }
     unclip(hdc);
     if note {
@@ -1203,121 +1193,118 @@ unsafe fn paint_pomo(hdc: HDC, w: i32, _h: i32) {
     pill(hdc, px + pw + gap, bw, "\u{25ce}", "Focus Time", a.pomo_mode == 0, 25);
 }
 
+// Water Reminder (Ram's reference): litres drunk / goal with the reminder
+// bell switch, a progress line, Drink + Settings; a gauge on the right.
 unsafe fn paint_water(hdc: HDC, w: i32, _h: i32) {
     let a = app();
     let ml = a.store.water_ml;
     let goal = a.store.water_goal.max(1);
-    let pct = ((ml as f64 / goal as f64) * 100.0).round().min(100.0) as i32;
+    let frac = (ml as f64 / goal as f64).clamp(0.0, 1.0);
+    let pct = (frac * 100.0).round() as i32;
+    let grey = cr(161, 161, 166);
     let x0 = 48;
-    draw_text(hdc, "Water Reminder", x0, 66, 200, 17, "Segoe UI", 12, 400, cr(161, 161, 166), DT_LEFT);
-    let litres = |v: i32| {
-        let s = format!("{:.2}", v as f64 / 1000.0);
-        s.trim_end_matches('0').trim_end_matches('.').to_string()
-    };
-    let amt = litres(ml);
-    let aw = text_width(&amt, "Segoe UI", 30, 700, hdc);
-    draw_text(hdc, &amt, x0, 83, aw + 4, 40, "Segoe UI", 30, 700, WHITE, DT_LEFT);
-    draw_text(hdc, &format!("/ {} L", litres(goal)), x0 + aw + 7, 92, 100, 26, "Segoe UI", 15, 500, cr(161, 161, 166), DT_LEFT);
-    // "Today · 60% · Keep going"
-    let p1 = "Today \u{00b7} ";
-    let p2 = format!("{}%", pct);
-    let p3 = if ml >= goal { " \u{00b7} Goal reached" } else { " \u{00b7} Keep going" };
-    let w1 = text_width(p1, "Segoe UI", 12, 400, hdc);
-    let w2 = text_width(&p2, "Segoe UI", 12, 700, hdc);
-    draw_text(hdc, p1, x0, 123, w1 + 2, 17, "Segoe UI", 12, 400, cr(161, 161, 166), DT_LEFT);
-    draw_text(hdc, &p2, x0 + w1, 123, w2 + 2, 17, "Segoe UI", 12, 700, WHITE, DT_LEFT);
-    draw_text(hdc, p3, x0 + w1 + w2, 123, 200 - w1 - w2, 17, "Segoe UI", 12, 400, cr(161, 161, 166), DT_LEFT);
-    pill_btn(hdc, x0, 148, "Drink", 13, 600, 16, 29, BLUE, WHITE, A_DRINK, 0);
-    // drinks by hour
-    let bx0 = x0 + 200 + 18;
-    let (by0, bh) = (PMID - 42, 84);
-    fill_rect_c(hdc, bx0, by0, 1, bh, cr(58, 58, 60));
-    let log: Vec<(i32, i32)> = {
-        let l = &a.store.water_log;
-        l[l.len().saturating_sub(6)..].to_vec()
-    };
-    if log.is_empty() {
-        draw_text(hdc, "No drinks yet today", bx0 + 7, by0, w - 48 - bx0 - 7, bh, "Segoe UI", 12, 400, cr(142, 142, 147), DT_CENTER);
-        return;
+    let lw = 252; // left column width
+    // 0.0 / 1.5 L
+    let amt = format!("{:.1}", ml as f64 / 1000.0);
+    let aw = text_width(&amt, "Segoe UI", 34, 700, hdc);
+    draw_text(hdc, &amt, x0, 52, aw + 4, 46, "Segoe UI", 34, 700, WHITE, DT_LEFT);
+    let g = format!("{:.1}", goal as f64 / 1000.0);
+    draw_text(hdc, &format!("/ {} L", g.trim_end_matches(".0")), x0 + aw + 6, 64, 90, 30, "Segoe UI", 15, 500, grey, DT_LEFT);
+    // reminders switch with a bell knob
+    let on = a.store.reminders;
+    let (sx, sy, sw, sh) = (x0 + lw - 44, 62, 44, 26);
+    fill_round(hdc, sx, sy, sw, sh, sh, if on { BLUE } else { cr(58, 58, 62) });
+    let kx = if on { sx + sw - 13 } else { sx + 13 };
+    fill_circle(hdc, kx, sy + 13, 10, WHITE);
+    draw_text(hdc, "\u{ea8f}", kx - 10, sy + 3, 20, 20, "Segoe MDL2 Assets", 10, 400, cr(30, 30, 32), DT_CENTER);
+    add_action(sx, sy, sw, sh, A_WATER_BELL, 0);
+    // Today · 0% · Reminders off
+    let status = format!("Today \u{00b7} {}% \u{00b7} Reminders {}", pct, if on { "on" } else { "off" });
+    draw_text(hdc, &status, x0, 98, lw, 18, "Segoe UI", 12, 400, grey, DT_LEFT);
+    // progress line
+    fill_round(hdc, x0, 121, lw, 5, 5, cr(44, 44, 48));
+    if frac > 0.0 {
+        gfx::fill_round(x0 as f32, 121.0, (lw as f32 * frac as f32).max(5.0), 5.0, 2.5, BLUE, 1.0);
     }
-    let maxv = log.iter().map(|e| e.1).max().unwrap_or(1).max(500) as f64;
-    let area_x = bx0 + 7;
-    let area_w = w - 48 - area_x - 18; // room for the "ml" label
-    let n = log.len() as i32;
-    let gap = 10;
-    let colw = ((area_w - gap * (n - 1)) / n).min(40);
-    for (i, (hr, v)) in log.iter().enumerate() {
-        let x = area_x + i as i32 * (colw + gap);
-        let hpx = ((*v as f64 / maxv) * 60.0).max(3.0) as i32;
-        fill_round(hdc, x, by0 + bh - 16 - hpx, colw, hpx, 8, BLUE);
-        draw_text(hdc, &format!("{:02}", hr), x, by0 + bh - 14, colw, 14, "Segoe UI", 10, 400, cr(142, 142, 147), DT_CENTER);
+    // Drink + Settings
+    let by = 140;
+    let hov_d = a.hover.0 == A_DRINK;
+    fill_round(hdc, x0, by, 82, 34, 34, if hov_d { cr(18, 58, 104) } else { cr(12, 42, 78) });
+    draw_droplet(hdc, x0 + 22, by + 17, BLUE);
+    draw_text(hdc, "Drink", x0 + 34, by, 44, 34, "Segoe UI", 13, 600, BLUE, DT_LEFT);
+    add_action(x0, by, 82, 34, A_DRINK, 0);
+    let sx2 = x0 + 92;
+    let hov_s = a.hover.0 == A_WATER_SETTINGS;
+    fill_round(hdc, sx2, by, 98, 34, 34, if hov_s { cr(52, 52, 56) } else { cr(38, 38, 42) });
+    draw_text(hdc, "\u{e9e9}", sx2 + 10, by, 22, 34, "Segoe MDL2 Assets", 13, 400, WHITE, DT_CENTER);
+    draw_text(hdc, "Settings", sx2 + 34, by, 60, 34, "Segoe UI", 13, 600, WHITE, DT_LEFT);
+    add_action(sx2, by, 98, 34, A_WATER_SETTINGS, 0);
+    // divider
+    gfx::fill_rect((x0 + lw + 18) as f32, 58.0, 1.0, 118.0, cr(48, 48, 52), 1.0);
+    // gauge: 270 degrees open at the bottom
+    let gx = (x0 + lw + 19 + w - 48) / 2;
+    let gy = 116;
+    let r = 50;
+    draw_arc(hdc, gx, gy, r, 135.0, 270.0, 9, cr(40, 40, 44));
+    if frac > 0.0 {
+        draw_arc(hdc, gx, gy, r, 135.0, 270.0 * frac, 9, BLUE);
     }
-    draw_text(hdc, "ml", w - 48 - 16, by0 + bh - 14, 16, 14, "Segoe UI", 10, 400, cr(142, 142, 147), DT_RIGHT);
+    let end = (135.0 + 270.0 * frac).to_radians();
+    let (ex, ey) = (gx as f64 + r as f64 * end.cos(), gy as f64 + r as f64 * end.sin());
+    gfx::fill_circle(ex as f32, ey as f32, 5.5, if frac > 0.0 { WHITE } else { cr(120, 120, 126) }, 1.0);
+    draw_text(hdc, &pct.to_string(), gx - 40, gy - 24, 80, 40, "Segoe UI", 30, 700, WHITE, DT_CENTER);
+    draw_droplet(hdc, gx - 7, gy + 22, cr(120, 120, 126));
+    draw_text(hdc, "%", gx - 1, gy + 14, 20, 18, "Segoe UI", 12, 600, cr(161, 161, 166), DT_LEFT);
 }
 
-unsafe fn paint_shelf(hdc: HDC, w: i32, h: i32) {
+// Shelf: one big dashed drop zone when empty; otherwise file tiles in a
+// row with a smaller drop tile at the end.
+unsafe fn paint_shelf(hdc: HDC, w: i32, _h: i32) {
     let a = app();
-    let gap = 18;
-    let colw = (w - 96 - gap) / 2;
-    let fx = 48;
-    // files column
-    let n = a.shelf_items.len().min(3) as i32;
-    let rows_h = if n == 0 { 30 } else { n * 36 + (n - 1) * 6 };
-    let more = a.shelf_items.len() as i32 - n;
-    let total = 18 + 6 + rows_h + if more > 0 { 18 } else { 0 };
-    let mut y = PMID - total / 2;
-    draw_text(hdc, "Shelf", fx, y, 80, 18, "Segoe UI", 12, 400, cr(161, 161, 166), DT_LEFT);
-    if !a.shelf_items.is_empty() {
-        let tw = text_width("Clear", "Segoe UI", 11, 600, hdc) + 20;
-        pill_btn(hdc, fx + colw - tw, y, "Clear", 11, 600, 10, 18, cr(44, 44, 46), WHITE, A_SHELF_CLEAR, 0);
+    let grey = cr(142, 142, 147);
+    let dash = cr(84, 84, 90);
+    let (zx, zy, zw, zh) = (48, 44, w - 96, 150);
+    if a.shelf_items.is_empty() {
+        gfx::fill_round(zx as f32, zy as f32, zw as f32, zh as f32, 18.0, cr(14, 14, 16), 1.0);
+        gfx::stroke_round(zx as f32 + 0.75, zy as f32 + 0.75, zw as f32 - 1.5, zh as f32 - 1.5, 18.0, 1.5, true, dash, 1.0);
+        let my = zy + zh / 2;
+        draw_text(hdc, "\u{e896}", w / 2 - 20, my - 46, 40, 40, "Segoe MDL2 Assets", 28, 400, cr(225, 225, 230), DT_CENTER);
+        draw_text(hdc, "Drop files here", zx, my - 2, zw, 22, "Segoe UI", 15, 600, WHITE, DT_CENTER);
+        draw_text(hdc, "Drag files onto the notch \u{00b7} click one to open it", zx, my + 20, zw, 18, "Segoe UI", 11, 400, grey, DT_CENTER);
+        return;
     }
-    y += 24;
-    if n == 0 {
-        draw_text(hdc, "Nothing here yet", fx, y, colw, 30, "Segoe UI", 12, 400, cr(99, 99, 108), DT_LEFT);
-    }
-    for (i, item) in a.shelf_items.iter().take(3).enumerate() {
-        fill_round(hdc, fx, y, colw, 36, 20, cr(28, 28, 30));
-        // icon tile: folder amber, file green -> blue
-        let is_dir = std::fs::metadata(&item.path).map(|m| m.is_dir()).unwrap_or(false);
-        if is_dir {
-            fill_round(hdc, fx + 10, y + 6, 24, 24, 12, cr(255, 176, 0));
-        } else {
-            clip_round(hdc, fx + 10, y + 6, 24, 24, 6);
-            for k in 0..12 {
-                let col = mix(cr(52, 199, 89), BLUE, k as f64 / 11.0);
-                fill_rect_c(hdc, fx + 10 + k * 2, y + 6, 3, 24, col);
-            }
-            unclip(hdc);
-        }
+    let n = a.shelf_items.len();
+    let shown = n.min(4);
+    let (tw, gap) = (86, 9);
+    let ty = zy + 8;
+    let th = zh - 16;
+    for (i, item) in a.shelf_items.iter().take(shown).enumerate() {
+        let tx = zx + i as i32 * (tw + gap);
         let hov = a.hover.1 == i as i32 && (a.hover.0 == A_SHELF_OPEN || a.hover.0 == A_SHELF_REMOVE);
-        draw_text(hdc, &item.name.clone(), fx + 44, y, colw - 44 - 64, 36, "Segoe UI", 13, 400, WHITE, DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
-        add_action(fx, y, colw - 30, 36, A_SHELF_OPEN, i as i32);
+        fill_round(hdc, tx, ty, tw, th, 32, if hov { cr(40, 40, 44) } else { cr(28, 28, 31) });
+        let is_dir = std::fs::metadata(&item.path).map(|m| m.is_dir()).unwrap_or(false);
+        let (ic, glyph) = if is_dir { (cr(255, 176, 0), "\u{e8b7}") } else { (BLUE, "\u{e8a5}") };
+        fill_round(hdc, tx + tw / 2 - 22, ty + 16, 44, 44, 24, ic);
+        draw_text(hdc, glyph, tx + tw / 2 - 22, ty + 16, 44, 44, "Segoe MDL2 Assets", 20, 400, WHITE, DT_CENTER);
+        draw_text(hdc, &item.name.clone(), tx + 6, ty + 68, tw - 12, 18, "Segoe UI", 12, 500, WHITE, DT_CENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+        draw_text(hdc, &item.size.clone(), tx + 6, ty + 86, tw - 12, 16, "Segoe UI", 10, 400, grey, DT_CENTER);
+        add_action(tx, ty, tw, th, A_SHELF_OPEN, i as i32);
         if hov {
-            draw_text(hdc, "\u{2715}", fx + colw - 30, y, 20, 36, "Segoe UI", 11, 400, cr(255, 107, 97), DT_CENTER);
-            add_action(fx + colw - 32, y, 30, 36, A_SHELF_REMOVE, i as i32);
-        } else {
-            draw_text(hdc, &item.size.clone(), fx + colw - 70, y, 60, 36, "Segoe UI", 11, 400, cr(142, 142, 147), DT_RIGHT);
+            fill_circle(hdc, tx + tw - 13, ty + 13, 9, cr(64, 64, 68));
+            draw_text(hdc, "\u{2715}", tx + tw - 22, ty + 4, 18, 18, "Segoe UI", 9, 600, WHITE, DT_CENTER);
+            add_action(tx + tw - 24, ty + 2, 22, 22, A_SHELF_REMOVE, i as i32);
         }
-        y += 42;
     }
-    if more > 0 {
-        draw_text(hdc, &format!("+{} more", more), fx, y - 4, colw, 18, "Segoe UI", 11, 400, cr(99, 99, 108), DT_LEFT);
-    }
-    // drop zone
-    let dx = fx + colw + gap;
-    let (dy, dh) = (PY0, h - 34 - 6 - PY0);
-    let lb = LOGBRUSH { lbStyle: BS_SOLID, lbColor: cr(72, 72, 74), lbHatch: 0 };
-    let pen = ExtCreatePen((PS_GEOMETRIC | PS_DASH) as u32, 2, &lb, 0, null());
-    let op = SelectObject(hdc, pen as HGDIOBJ);
-    let ob = SelectObject(hdc, GetStockObject(NULL_BRUSH as i32));
-    RoundRect(hdc, dx, dy, dx + colw, dy + dh, 28, 28);
-    SelectObject(hdc, op);
-    SelectObject(hdc, ob);
-    DeleteObject(pen as HGDIOBJ);
-    let my = dy + dh / 2;
-    draw_text(hdc, "Drop files here", dx, my - 24, colw, 20, "Segoe UI", 13, 600, WHITE, DT_CENTER);
-    draw_text(hdc, "Release to add", dx, my - 3, colw, 16, "Segoe UI", 11, 400, cr(142, 142, 147), DT_CENTER);
-    draw_text(hdc, "Drag out anytime \u{00b7} click to open", dx, my + 13, colw, 16, "Segoe UI", 11, 400, cr(142, 142, 147), DT_CENTER);
+    // drop tile
+    let dx = zx + shown as i32 * (tw + gap);
+    let dw = zx + zw - dx;
+    gfx::stroke_round(dx as f32 + 0.75, ty as f32 + 0.75, dw as f32 - 1.5, th as f32 - 1.5, 16.0, 1.5, true, dash, 1.0);
+    draw_text(hdc, "\u{e896}", dx, ty + 14, dw, 34, "Segoe MDL2 Assets", 20, 400, cr(225, 225, 230), DT_CENTER);
+    draw_text(hdc, "Drop files", dx, ty + 50, dw, 18, "Segoe UI", 12, 600, WHITE, DT_CENTER);
+    let more = if n > shown { format!("+{} more", n - shown) } else { "Click to open".to_string() };
+    draw_text(hdc, &more, dx, ty + 68, dw, 16, "Segoe UI", 10, 400, grey, DT_CENTER);
+    let cw = text_width("Clear", "Segoe UI", 11, 600, hdc) + 20;
+    pill_btn(hdc, dx + (dw - cw) / 2, ty + th - 30, "Clear", 11, 600, 10, 22, cr(44, 44, 46), WHITE, A_SHELF_CLEAR, 0);
 }
 
 const TAG_COLORS: [u32; 5] = [cr(255, 69, 58), cr(10, 132, 255), cr(255, 159, 10), cr(191, 90, 242), cr(48, 209, 88)];
@@ -1541,6 +1528,18 @@ unsafe fn do_action(code: i32, param: i32, x: i32, _y: i32, hwnd: HWND) {
             a.store.anim_fast = param == 1;
             store::save(&a.store);
         }
+        A_GLOW => {
+            a.store.glow = !a.store.glow;
+            store::save(&a.store);
+            present();
+        }
+        A_WATER_SETTINGS => {
+            a.settings_section = 6;
+            open_settings();
+            if !a.settings_hwnd.is_null() {
+                InvalidateRect(a.settings_hwnd, null(), 0);
+            }
+        }
         A_LYRICS_EN => {
             a.store.lyrics_english = !a.store.lyrics_english;
             lyrics::ENGLISH.store(a.store.lyrics_english, std::sync::atomic::Ordering::Relaxed);
@@ -1695,10 +1694,10 @@ unsafe fn do_action(code: i32, param: i32, x: i32, _y: i32, hwnd: HWND) {
         }
         _ => {}
     }
-    InvalidateRect(hwnd, null(), 0);
+    inval(hwnd);
     let sh = app().settings_hwnd;
     if !sh.is_null() {
-        InvalidateRect(sh, null(), 0);
+        inval(sh);
     }
 }
 
@@ -1716,9 +1715,12 @@ unsafe fn show_edit(hwnd: HWND) {
     let rows_h = n.max(1) * 34 + 34;
     let top = 121 - (22 + rows_h) / 2 + 24 + n * 34;
     let lw = dw - 48 - 84 - 28;
-    SetWindowPos(a.edit_hwnd, null_mut(), 48 * pw / dw, top * ph / dh, lw * pw / dw, 28 * ph / dh, SWP_NOZORDER | SWP_SHOWWINDOW);
+    // the edit box is its own small topmost window over the notch
+    let (ox, oy) = (a.win_pos.0 + a.notch_off.0, a.win_pos.1 + a.notch_off.1);
+    SetWindowPos(a.edit_hwnd, HWND_TOPMOST, ox + 48 * pw / dw, oy + top * ph / dh, lw * pw / dw, 28 * ph / dh, SWP_SHOWWINDOW);
     SetWindowTextW(a.edit_hwnd, wide("").as_ptr());
     ShowWindow(a.edit_hwnd, SW_SHOW);
+    SetForegroundWindow(a.edit_hwnd);
     SetFocus(a.edit_hwnd);
 }
 
@@ -1735,7 +1737,7 @@ unsafe fn commit_edit() {
         }
     }
     SetFocus(a.hwnd);
-    InvalidateRect(a.hwnd, null(), 0);
+    inval(a.hwnd);
 }
 
 unsafe extern "system" fn edit_subclass(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _id: usize, _data: usize) -> LRESULT {
@@ -1755,11 +1757,10 @@ unsafe extern "system" fn edit_subclass(hwnd: HWND, msg: u32, wparam: WPARAM, lp
 
 // ---------- pointer helpers ----------
 // Client pixel position -> design units.
-unsafe fn client_to_design(hwnd: HWND, px: i32, py: i32) -> (i32, i32) {
-    let mut crc: RECT = std::mem::zeroed();
-    GetClientRect(hwnd, &mut crc);
-    let (dw, dh) = cur_design();
-    (px * dw / crc.right.max(1), py * dh / crc.bottom.max(1))
+unsafe fn client_to_design(_hwnd: HWND, px: i32, py: i32) -> (i32, i32) {
+    let a = app();
+    let k = a.notch_k.max(0.1);
+    (((px - a.notch_off.0) as f32 / k).floor() as i32, ((py - a.notch_off.1) as f32 / k).floor() as i32)
 }
 
 unsafe fn lparam_to_design(hwnd: HWND, lparam: LPARAM) -> (i32, i32) {
@@ -1827,7 +1828,8 @@ fn seg(opts: &[(&str, i32)], cur: i32, code: i32) -> RowKind {
 
 fn settings_scale() -> i32 {
     unsafe {
-        let s = (GetDpiForSystem() as i32 * 100 / 96).max(100);
+        // a compact window: 85% of the design size at the display scaling
+        let s = (GetDpiForSystem() as i32 * 85 / 96).max(85);
         // keep the window on screen on small displays
         let fit = GetSystemMetrics(SM_CYSCREEN) * 90 / SET_H;
         s.min(fit.max(60))
@@ -1858,11 +1860,14 @@ unsafe fn open_settings() {
         return;
     }
     a.settings_hwnd = hwnd;
-    let rad = 28 * sc / 100; // 14 px corners
-    SetWindowRgn(hwnd, CreateRoundRectRgn(0, 0, w + 1, h + 1, rad, rad), 1);
+    // Windows 11 rounds the corners smoothly (with its shadow); older
+    // Windows keeps square corners.
+    let pref: i32 = 2; // DWMWCP_ROUND
+    windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute(hwnd, 33, &pref as *const i32 as *const _, 4);
+    let _ = sc;
     ShowWindow(hwnd, SW_SHOW);
     SetForegroundWindow(hwnd);
-    InvalidateRect(a.hwnd, null(), 0);
+    inval(a.hwnd);
 }
 
 // Section label above a card ("Startup", "Notch" ...).
@@ -2028,15 +2033,7 @@ unsafe fn s_logo(hdc: HDC, cx: i32, y: i32) {
         POINT { x: x + 64, y: y + 56 },
         POINT { x: x + 16, y: y + 56 },
     ];
-    let brush = CreateSolidBrush(cr(18, 18, 24));
-    let pen = CreatePen(PS_NULL as i32, 0, 0);
-    let ob = SelectObject(hdc, brush as HGDIOBJ);
-    let op = SelectObject(hdc, pen as HGDIOBJ);
-    Polygon(hdc, pts.as_ptr(), pts.len() as i32);
-    SelectObject(hdc, ob);
-    SelectObject(hdc, op);
-    DeleteObject(brush as HGDIOBJ);
-    DeleteObject(pen as HGDIOBJ);
+    polygon(hdc, &pts, cr(18, 18, 24));
     fill_round(hdc, x + 16, y + 46, 48, 20, 22, cr(18, 18, 24));
     // eyes
     fill_round(hdc, x + 28, y + 42, 6, 9, 6, cr(207, 230, 255));
@@ -2145,6 +2142,7 @@ unsafe fn paint_settings_window(hdc: HDC, w: i32, h: i32) {
             s_group(hdc, x0, cw, &mut y, &[
                 row("Open the notch", "", seg(&[("Hover", 0), ("Click", 1)], st.open_click as i32, A_OPEN_MODE)),
                 row("Page icons", "Show page icons when you hover the page dots", RowKind::Switch(st.page_icons, A_PAGE_ICONS, true)),
+                row("Green glow", "A soft green light around the notch", RowKind::Switch(st.glow, A_GLOW, true)),
             ]);
             s_h2(hdc, x0, cw, &mut y, "Motion");
             s_group(hdc, x0, cw, &mut y, &[row("Animation speed", "", seg(&[("Normal", 0), ("Fast", 1)], st.anim_fast as i32, A_ANIM))]);
@@ -2278,7 +2276,7 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
                         if param == 0 {
                             app().autostart = autostart_enabled();
                         }
-                        InvalidateRect(hwnd, null(), 0);
+                        inval(hwnd);
                     }
                     _ => {
                         do_action(code, param, x, y, app().hwnd);
@@ -2292,7 +2290,7 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
         }
         WM_TIMER => {
             KillTimer(hwnd, 1);
-            InvalidateRect(hwnd, null(), 0);
+            inval(hwnd);
             0
         }
         // hover highlight on the sidebar
@@ -2305,7 +2303,7 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
             let a = app();
             if hov != a.settings_hover {
                 a.settings_hover = hov;
-                InvalidateRect(hwnd, null(), 0);
+                inval(hwnd);
             }
             if hov >= 0 {
                 let mut tme = TRACKMOUSEEVENT {
@@ -2321,7 +2319,7 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
         WM_MOUSELEAVE_MSG => {
             if app().settings_hover != -1 {
                 app().settings_hover = -1;
-                InvalidateRect(hwnd, null(), 0);
+                inval(hwnd);
             }
             0
         }
@@ -2332,7 +2330,7 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
         WM_DESTROY => {
             let a = app();
             a.settings_hwnd = null_mut();
-            InvalidateRect(a.hwnd, null(), 0);
+            inval(a.hwnd);
             0
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -2340,85 +2338,35 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
 }
 
 // Render a painter that draws in design units (dw x dh) into `dst` at
-// (dx, dy, pw, ph): drawn into a 2x buffer through a world transform, then
-// halftone-downscaled for smooth ClearType text and shapes.
+// (dx, dy, pw, ph) with Direct2D (anti-aliased shapes and text).
 unsafe fn render_scaled(ref_dc: HDC, dst: HDC, dx: i32, dy: i32, pw: i32, ph: i32, dw: i32, dh: i32, painter: &dyn Fn(HDC)) {
-    const SS: i32 = 2;
     if pw <= 0 || ph <= 0 {
         return;
     }
     let mem = CreateCompatibleDC(ref_dc);
-    let bmp = CreateCompatibleBitmap(ref_dc, pw * SS, ph * SS);
-    let old = SelectObject(mem, bmp as HGDIOBJ);
-    // v0.2.1 used MM_ANISOTROPIC window/viewport exts here and on Ram's
-    // machine the mapping silently did not apply. A world transform
-    // (GM_ADVANCED) scales every draw call reliably.
-    SetGraphicsMode(mem, GM_ADVANCED);
-    let xform = XFORM {
-        eM11: (pw * SS) as f32 / dw as f32,
-        eM12: 0.0,
-        eM21: 0.0,
-        eM22: (ph * SS) as f32 / dh as f32,
-        eDx: 0.0,
-        eDy: 0.0,
-    };
-    SetWorldTransform(mem, &xform);
-    let prev_k = app().paint_k;
-    app().paint_k = (xform.eM11, xform.eM22);
-    let prev_ops = app().text_ops.replace(Vec::new());
-    painter(mem);
-    let ops = std::mem::replace(&mut app().text_ops, prev_ops).unwrap_or_default();
-    app().paint_k = prev_k;
-    // Reset to identity BEFORE StretchBlt: a transform left active on the
-    // source DC can be applied to the source rectangle too.
-    ModifyWorldTransform(mem, null(), MWT_IDENTITY);
-    SetStretchBltMode(dst, HALFTONE);
-    SetBrushOrgEx(dst, 0, 0, null_mut());
-    StretchBlt(dst, dx, dy, pw, ph, mem, 0, 0, pw * SS, ph * SS, SRCCOPY);
-    // sharp text, drawn at the real pixel size
-    if !ops.is_empty() {
-        let old_mode = SetGraphicsMode(dst, GM_ADVANCED);
-        let tx = XFORM {
-            eM11: pw as f32 / dw as f32,
-            eM12: 0.0,
-            eM21: 0.0,
-            eM22: ph as f32 / dh as f32,
-            eDx: dx as f32,
-            eDy: dy as f32,
-        };
-        SetWorldTransform(dst, &tx);
-        for op in &ops {
-            let r = op.rect;
-            draw_text(dst, &op.s, r.left, r.top, r.right - r.left, r.bottom - r.top, &op.font, op.size, op.weight, op.color, op.flags);
-        }
-        ModifyWorldTransform(dst, null(), MWT_IDENTITY);
-        SetGraphicsMode(dst, old_mode);
-    }
-    SelectObject(mem, old);
-    DeleteObject(bmp as HGDIOBJ);
-    DeleteDC(mem);
-}
-
-// During a resize animation: draw one look of the notch (minimized or
-// opened) at its own final size, centred on the top edge of the window and
-// clipped to it, blended over `back` with the given opacity.
-unsafe fn blend_frame(ref_dc: HDC, back: HDC, pw: i32, ph: i32, expanded: bool, alpha: u8) {
-    if alpha == 0 {
+    let mut bi: BITMAPINFO = std::mem::zeroed();
+    bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+    bi.bmiHeader.biWidth = pw;
+    bi.bmiHeader.biHeight = -ph;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    let mut bits: *mut core::ffi::c_void = null_mut();
+    let dib = CreateDIBSection(ref_dc, &bi, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+    if dib.is_null() {
+        DeleteDC(mem);
         return;
     }
-    let (dw, dh) = if expanded { expanded_size() } else { collapsed_size() };
-    let (fw, fh) = px_of((dw, dh), expanded_scale());
-    let fd = CreateCompatibleDC(ref_dc);
-    let fb = CreateCompatibleBitmap(ref_dc, fw, fh);
-    let old = SelectObject(fd, fb as HGDIOBJ);
-    render_scaled(ref_dc, fd, 0, 0, fw, fh, dw, dh, &|m| paint(m, dw, dh, expanded));
-    let (sx, dx, cw) = if fw > pw { ((fw - pw) / 2, 0, pw) } else { (0, (pw - fw) / 2, fw) };
-    let ch = fh.min(ph);
-    let bf = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: alpha, AlphaFormat: 0 };
-    AlphaBlend(back, dx, 0, cw, ch, fd, sx, 0, cw, ch, bf);
-    SelectObject(fd, old);
-    DeleteObject(fb as HGDIOBJ);
-    DeleteDC(fd);
+    let old = SelectObject(mem, dib as HGDIOBJ);
+    if gfx::begin(mem as _, pw, ph) {
+        gfx::transform(pw as f32 / dw as f32, ph as f32 / dh as f32, 0.0, 0.0);
+        painter(mem);
+        gfx::end();
+        BitBlt(dst, dx, dy, pw, ph, mem, 0, 0, SRCCOPY);
+    }
+    SelectObject(mem, old);
+    DeleteObject(dib as HGDIOBJ);
+    DeleteDC(mem);
 }
 
 // ---------- window proc ----------
@@ -2426,13 +2374,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     match msg {
         WM_CREATE => {
             let edit = CreateWindowExW(
-                0,
+                WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
                 wide("Edit").as_ptr(),
                 wide("").as_ptr(),
-                WS_CHILD | WS_BORDER,
+                WS_POPUP | WS_BORDER,
                 0, 0, 10, 10,
                 hwnd,
-                EDIT_ID as isize as HMENU,
+                null_mut(),
                 GetModuleHandleW(null()),
                 null(),
             );
@@ -2452,36 +2400,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_PAINT => {
             let mut ps: PAINTSTRUCT = std::mem::zeroed();
-            let hdc = BeginPaint(hwnd, &mut ps);
-            let mut rc: RECT = std::mem::zeroed();
-            GetClientRect(hwnd, &mut rc);
-            let (pw, ph) = (rc.right - rc.left, rc.bottom - rc.top);
-            let a = app();
-            if !a.animating {
-                let (dw, dh) = cur_design();
-                let exp = a.expanded;
-                render_scaled(hdc, hdc, 0, 0, pw, ph, dw, dh, &|m| paint(m, dw, dh, exp));
-            } else {
-                // Mid-animation: the black shape is resizing; the minimized
-                // look fades out early and the opened page fades in late
-                // (or the reverse when closing), so nothing ever stretches.
-                let back = CreateCompatibleDC(hdc);
-                let bb = CreateCompatibleBitmap(hdc, pw.max(1), ph.max(1));
-                let old = SelectObject(back, bb as HGDIOBJ);
-                fill_rect_c(back, 0, 0, pw, ph, BLACK);
-                let open = a.open_level.clamp(0.0, 1.0);
-                if open < 0.35 {
-                    blend_frame(hdc, back, pw, ph, false, ((1.0 - open / 0.35) * 255.0) as u8);
-                }
-                if open > 0.3 {
-                    blend_frame(hdc, back, pw, ph, true, (((open - 0.3) / 0.7).clamp(0.0, 1.0) * 255.0) as u8);
-                }
-                BitBlt(hdc, 0, 0, pw, ph, back, 0, 0, SRCCOPY);
-                SelectObject(back, old);
-                DeleteObject(bb as HGDIOBJ);
-                DeleteDC(back);
-            }
+            BeginPaint(hwnd, &mut ps);
             EndPaint(hwnd, &ps);
+            present();
             0
         }
         WM_ERASEBKGND => 1,
@@ -2497,6 +2418,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 TrackMouseEvent(&mut tme);
                 a.tracking = true;
             }
+            let (cpx, cpy) = ((lparam & 0xFFFF) as i16 as i32, ((lparam >> 16) & 0xFFFF) as i16 as i32);
+            if !in_notch(cpx, cpy) {
+                // on the glow: counts as outside
+                if a.expanded && !a.animating && !a.vol_drag {
+                    if a.dots_hover || a.hover.0 != 0 {
+                        a.dots_hover = false;
+                        a.hover = (0, -1);
+                    }
+                    collapse(hwnd);
+                }
+                return 0;
+            }
             if !a.expanded {
                 if !a.store.open_click {
                     a.expanded = true;
@@ -2511,7 +2444,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // dragging the volume slider
             if a.vol_drag && (wparam & 0x0001) != 0 {
                 vol_set_from_x(x);
-                InvalidateRect(hwnd, null(), 0);
+                inval(hwnd);
                 return 0;
             }
             // bottom dots <-> page icons on hover
@@ -2520,7 +2453,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let over = a.store.page_icons && x >= z.left && x < z.right && y >= z.top && y < z.bottom;
             if over != a.dots_hover {
                 a.dots_hover = over;
-                InvalidateRect(hwnd, null(), 0);
+                inval(hwnd);
             }
             // hover looks (buttons, rows, the volume slider)
             let mut hov = (0, -1);
@@ -2531,7 +2464,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             if hov != a.hover {
                 a.hover = hov;
-                InvalidateRect(hwnd, null(), 0);
+                inval(hwnd);
             }
             0
         }
@@ -2541,7 +2474,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if a.dots_hover || a.hover.0 != 0 {
                 a.dots_hover = false;
                 a.hover = (0, -1);
-                InvalidateRect(hwnd, null(), 0);
+                inval(hwnd);
             }
             // while dragging with the mouse captured, collapse happens on release
             collapse(hwnd);
@@ -2563,7 +2496,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 a.vol_drag = true;
                 SetCapture(hwnd);
                 vol_set_from_x(x);
-                InvalidateRect(hwnd, null(), 0);
+                inval(hwnd);
             }
             0
         }
@@ -2583,10 +2516,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 if !(p.x >= wr.left && p.x < wr.right && p.y >= wr.top && p.y < wr.bottom) {
                     collapse(hwnd);
                 }
-                InvalidateRect(hwnd, null(), 0);
+                inval(hwnd);
                 return 0;
             }
             if app().animating {
+                return 0;
+            }
+            if !in_notch((lparam & 0xFFFF) as i16 as i32, ((lparam >> 16) & 0xFFFF) as i16 as i32) {
                 return 0;
             }
             if !app().expanded {
@@ -2658,7 +2594,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                             media::volume_toggle_mute();
                             a.vol_muted = false;
                         }
-                        InvalidateRect(hwnd, null(), 0);
+                        inval(hwnd);
                     }
                     return 0;
                 }
@@ -2679,7 +2615,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 if now.saturating_sub(a.last_page_tick) >= 350 {
                     a.last_page_tick = now;
                     goto_page(hwnd, step_page(dir));
-                    InvalidateRect(hwnd, null(), 0);
+                    inval(hwnd);
                 }
             }
             0
@@ -2690,7 +2626,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_TIMER if wparam == TIMER_WAVE => {
             if !app().animating {
-                InvalidateRect(hwnd, null(), 0);
+                inval(hwnd);
             }
             0
         }
@@ -2808,7 +2744,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     KillTimer(hwnd, TIMER_WAVE);
                 }
             }
-            InvalidateRect(hwnd, null(), 0);
+            inval(hwnd);
             0
         }
         WM_RBUTTONUP => {
@@ -2831,6 +2767,7 @@ fn main() {
     unsafe {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         media::com_init_ui();
+        gfx::init();
         let mut st = store::load();
         let today = today_string();
         if st.water_date != today {
@@ -2850,7 +2787,10 @@ fn main() {
             page: 0,
             hover: (0, -1),
             seek_bar: (0, 1),
-            paint_k: (1.0, 1.0),
+            notch_off: (0, 0),
+            notch_k: 1.0,
+            win_pos: (0, 0),
+            presenting: false,
             alert_until: 0,
             last_ac: -1,
             autostart: false,
@@ -2868,12 +2808,8 @@ fn main() {
             open_from: 0.0,
             open_to: 0.0,
             wave_on: false,
-            thumb_gen: 0,
-            thumb_bmp: null_mut(),
-            thumb_size: 0,
             tracking: false,
             fonts: Vec::new(),
-            text_ops: None,
             actions: Vec::new(),
             pomo_total: (st.pomo_focus * 60) as u32,
             pomo_left: (st.pomo_focus * 60) as u32,
@@ -2931,7 +2867,7 @@ fn main() {
         let (w, h) = cur_size();
         let mon = notch_monitor();
         let hwnd = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
             class_name.as_ptr(),
             wide("Isle").as_ptr(),
             WS_POPUP,
@@ -2943,8 +2879,8 @@ fn main() {
         }
         app().hwnd = hwnd;
         app().cur_px = (w, h);
-        apply_region(hwnd, w, h, collapsed_radius());
-        ShowWindow(hwnd, SW_SHOW);
+        present();
+        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         media::spawn_media_thread();
 
         let mut msg: MSG = std::mem::zeroed();
