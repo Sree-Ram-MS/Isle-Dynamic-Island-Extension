@@ -21,15 +21,22 @@ use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SYSTEMTIME, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::*;
+use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetTickCount64};
-use windows_sys::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+use windows_sys::Win32::System::Registry::{
+    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
+    HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_SZ,
+};
+use windows_sys::Win32::UI::HiDpi::{
+    GetDpiForSystem, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE,
 };
 use windows_sys::Win32::UI::Shell::{
-    DefSubclassProc, DragAcceptFiles, DragFinish, DragQueryFileW, SetWindowSubclass, ShellExecuteW,
-    HDROP,
+    DefSubclassProc, DragAcceptFiles, DragFinish, DragQueryFileW, SHQueryUserNotificationState,
+    SetWindowSubclass, ShellExecuteW, HDROP,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -69,6 +76,11 @@ const A_LYRICS: i32 = 14;
 const A_LYRIC_LINE: i32 = 15;
 const A_VOL_BAR: i32 = 17;
 const A_VOL_MUTE: i32 = 18;
+const A_SETTINGS: i32 = 5;
+const A_SET_SCALE: i32 = 6;
+const A_AUTOSTART: i32 = 7;
+const A_SOUNDS: i32 = 8;
+const A_HIDE_FS: i32 = 9;
 const A_POMO_PLAY: i32 = 20;
 const A_POMO_RESET: i32 = 21;
 const A_POMO_MODE: i32 = 22;
@@ -83,10 +95,15 @@ const A_TODO_DELETE: i32 = 53;
 
 const PAGES: usize = 5; // 0 Music, 1 Pomodoro, 2 Water, 3 Shelf, 4 Todo
 
-// Real-pixel scale of the design (percent). Collapsed tab stays small; the
-// opened notch is drawn larger. Raise EXPANDED_SCALE for a bigger notch.
+// Real-pixel scale of the design (percent). The idle tab stays small; the
+// opened notch uses the Settings > Notch size choice (see expanded_scale()).
 const COLLAPSED_SCALE: i32 = 85;
-const EXPANDED_SCALE: i32 = 100;
+
+// The opened notch has the same height on every page.
+const EXPANDED_H: i32 = 232;
+
+const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const RUN_VALUE: &str = "Isle";
 
 // Page icons shown in place of the bottom dots while hovering them.
 // Water has no suitable glyph, so it is drawn by hand (empty string).
@@ -103,6 +120,11 @@ struct App {
     expanded: bool,
     page: usize,
     lyrics_open: bool,
+    settings_open: bool,
+    autostart: bool,
+    thumb_gen: u64,
+    thumb_bmp: HBITMAP,
+    thumb_size: i32,
     tracking: bool,
     fonts: Vec<(String, i32, i32, isize)>,
     actions: Vec<(RECT, i32, i32)>,
@@ -313,25 +335,21 @@ fn collapsed_size() -> (i32, i32) {
 
 fn expanded_size() -> (i32, i32) {
     let a = app();
-    // Every page keeps ~14 units of free room at the bottom for the page
-    // dots, which turn into icons when hovered.
-    if a.page == 0 && a.lyrics_open {
-        return (664, 224);
+    // Fixed height on every page (room for the page dots / hover icons at
+    // the bottom); only the lyrics split view is wider.
+    if a.page == 0 && a.lyrics_open && !a.settings_open {
+        return (664, EXPANDED_H);
     }
-    let h = match a.page {
-        0 => 232,
-        1 => 212,
-        2 => 212,
-        3 => {
-            if a.shelf_items.is_empty() {
-                210
-            } else {
-                (164 + a.shelf_items.len() as i32 * 40).min(344)
-            }
-        }
-        _ => 212,
-    };
-    (544, h)
+    (544, EXPANDED_H)
+}
+
+// Size of the opened notch in percent: the Settings choice, or for Auto
+// the Windows display scaling (clamped to the offered range).
+fn expanded_scale() -> i32 {
+    match app().store.scale {
+        0 => unsafe { (GetDpiForSystem() as i32 * 100 / 96).clamp(100, 150) },
+        s => s,
+    }
 }
 
 // Inline volume slider geometry (design units): sits on the controls row
@@ -360,7 +378,7 @@ fn cur_design() -> (i32, i32) {
 // is true device pixels, not Windows' blurry bitmap scaling).
 fn cur_size() -> (i32, i32) {
     let (w, h) = cur_design();
-    let s = if app().expanded { EXPANDED_SCALE } else { COLLAPSED_SCALE };
+    let s = if app().expanded { expanded_scale() } else { COLLAPSED_SCALE };
     ((w * s + 50) / 100, (h * s + 50) / 100)
 }
 
@@ -390,12 +408,10 @@ unsafe fn paint(hdc: HDC, w: i32, h: i32) {
         return;
     }
     paint_strip(hdc, w);
-    match app().page {
-        0 => paint_music(hdc, w, h),
-        1 => paint_pomo(hdc, w, h),
-        2 => paint_water(hdc, w, h),
-        3 => paint_shelf(hdc, w, h),
-        _ => paint_todo(hdc, w, h),
+    if app().settings_open {
+        paint_settings(hdc, w, h);
+    } else {
+        paint_page(hdc, w, h);
     }
     // chevrons
     for (is_prev, cx) in [(true, 22), (false, w - 22)] {
@@ -416,6 +432,16 @@ unsafe fn paint(hdc: HDC, w: i32, h: i32) {
         fill_round(hdc, dx, dy, dw, 5, 5, if i == app().page { WHITE } else { cr(67, 67, 75) });
         add_action(dx - 4, dy - 6, dw + 8, 17, A_DOT, i as i32);
         dx += dw + 6;
+    }
+}
+
+unsafe fn paint_page(hdc: HDC, w: i32, h: i32) {
+    match app().page {
+        0 => paint_music(hdc, w, h),
+        1 => paint_pomo(hdc, w, h),
+        2 => paint_water(hdc, w, h),
+        3 => paint_shelf(hdc, w, h),
+        _ => paint_todo(hdc, w, h),
     }
 }
 
@@ -464,7 +490,13 @@ unsafe fn paint_collapsed(hdc: HDC, w: i32, h: i32) {
 unsafe fn paint_strip(hdc: HDC, w: i32) {
     let a = app();
     // left title
-    match a.page {
+    match if a.settings_open { 99 } else { a.page } {
+        99 => {
+            draw_text(hdc, "Settings", 20, 0, 80, 38, "Segoe UI", 15, 650, WHITE, DT_LEFT);
+            let ww = text_width("Settings", "Segoe UI", 15, 650, hdc);
+            let ver = format!("v{}", env!("CARGO_PKG_VERSION"));
+            draw_text(hdc, &ver, 28 + ww, 2, 60, 38, "Segoe UI", 11, 400, FAINT, DT_LEFT);
+        }
         1 => draw_text(hdc, "Pomodoro", 20, 0, 130, 38, "Segoe UI", 15, 650, WHITE, DT_LEFT),
         2 => {
             draw_text(hdc, "Water", 20, 0, 60, 38, "Segoe UI", 15, 650, CYAN, DT_LEFT);
@@ -490,15 +522,79 @@ unsafe fn paint_strip(hdc: HDC, w: i32) {
     draw_text(hdc, &date, x, 0, dw + 4, 38, "Segoe UI", 13, 400, cr(232, 232, 236), DT_LEFT);
     x += dw + 8;
     draw_text(hdc, &time, x, 0, tw + 4, 38, "Segoe UI", 13, 700, WHITE, DT_LEFT);
-    // right actions
-    if a.page == 2 {
-        fill_round(hdc, w - 64, 6, 44, 26, 26, CARD2);
-        draw_text(hdc, "\u{ea8f}", w - 64, 6, 44, 26, "Segoe MDL2 Assets", 12, 400, WHITE, DT_CENTER);
-        add_action(w - 64, 6, 44, 26, A_WATER_BELL, 0);
-    } else if a.page == 3 {
-        draw_text(hdc, "\u{ea8f}", w - 44, 0, 26, 38, "Segoe MDL2 Assets", 14, 400, WHITE, DT_CENTER);
-        fill_circle(hdc, w - 22, 9, 3, RED);
+    // right actions (shifted left to make room for the settings gear)
+    if !a.settings_open {
+        if a.page == 2 {
+            fill_round(hdc, w - 110, 6, 44, 26, 26, CARD2);
+            draw_text(hdc, "\u{ea8f}", w - 110, 6, 44, 26, "Segoe MDL2 Assets", 12, 400, WHITE, DT_CENTER);
+            add_action(w - 110, 6, 44, 26, A_WATER_BELL, 0);
+        } else if a.page == 3 {
+            draw_text(hdc, "\u{ea8f}", w - 90, 0, 26, 38, "Segoe MDL2 Assets", 14, 400, WHITE, DT_CENTER);
+            fill_circle(hdc, w - 68, 9, 3, RED);
+        }
     }
+    // settings gear, top right on every page
+    let (gx, gy) = (w - 34, 19);
+    fill_circle(hdc, gx, gy, 13, if a.settings_open { cr(58, 58, 65) } else { cr(35, 35, 39) });
+    draw_text(hdc, "\u{e713}", gx - 13, gy - 13, 26, 26, "Segoe MDL2 Assets", 13, 400, WHITE, DT_CENTER);
+    add_action(gx - 14, gy - 14, 28, 28, A_SETTINGS, 0);
+}
+
+// GDI bitmap for the current album art, rebuilt only when the decoded
+// thumbnail changes. Returns (bitmap, pixel size) or None when there's no art.
+unsafe fn thumb_bitmap(hdc: HDC) -> Option<(HBITMAP, i32)> {
+    let a = app();
+    let t = media::THUMB.lock().ok()?;
+    if t.gen != a.thumb_gen {
+        if !a.thumb_bmp.is_null() {
+            DeleteObject(a.thumb_bmp as HGDIOBJ);
+            a.thumb_bmp = null_mut();
+        }
+        a.thumb_gen = t.gen;
+        a.thumb_size = t.size;
+        let need = (t.size.max(0) as usize) * (t.size.max(0) as usize) * 4;
+        if t.size > 0 && t.bgra.len() >= need {
+            let mut bi: BITMAPINFO = std::mem::zeroed();
+            bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+            bi.bmiHeader.biWidth = t.size;
+            bi.bmiHeader.biHeight = -t.size; // top-down
+            bi.bmiHeader.biPlanes = 1;
+            bi.bmiHeader.biBitCount = 32;
+            bi.bmiHeader.biCompression = BI_RGB;
+            let mut bits: *mut core::ffi::c_void = null_mut();
+            let bmp = CreateDIBSection(hdc, &bi, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+            if !bmp.is_null() && !bits.is_null() {
+                std::ptr::copy_nonoverlapping(t.bgra.as_ptr(), bits as *mut u8, need);
+                a.thumb_bmp = bmp;
+            } else if !bmp.is_null() {
+                DeleteObject(bmp as HGDIOBJ);
+            }
+        }
+    }
+    if a.thumb_bmp.is_null() {
+        None
+    } else {
+        Some((a.thumb_bmp, a.thumb_size))
+    }
+}
+
+// Album art square: the real thumbnail when the media session has one,
+// otherwise a tinted tile with a music note.
+unsafe fn draw_art(hdc: HDC, x: i32, y: i32, size: i32, rad: i32, glyph_size: i32, present: bool) {
+    if present {
+        if let Some((bmp, bsize)) = thumb_bitmap(hdc) {
+            let src = CreateCompatibleDC(hdc);
+            let old = SelectObject(src, bmp as HGDIOBJ);
+            SetStretchBltMode(hdc, HALFTONE);
+            SetBrushOrgEx(hdc, 0, 0, null_mut());
+            StretchBlt(hdc, x, y, size, size, src, 0, 0, bsize, bsize, SRCCOPY);
+            SelectObject(src, old);
+            DeleteDC(src);
+            return;
+        }
+    }
+    fill_round(hdc, x, y, size, size, rad, if present { cr(45, 60, 160) } else { CARD2 });
+    draw_text(hdc, "\u{e8d6}", x, y, size, size, "Segoe MDL2 Assets", glyph_size, 400, if present { WHITE } else { cr(142, 142, 152) }, DT_CENTER);
 }
 
 unsafe fn paint_music(hdc: HDC, w: i32, h: i32) {
@@ -508,12 +604,7 @@ unsafe fn paint_music(hdc: HDC, w: i32, h: i32) {
         return;
     }
     // art
-    if m.present {
-        fill_round(hdc, 40, 50, 88, 88, 16, cr(45, 60, 160));
-    } else {
-        fill_round(hdc, 40, 50, 88, 88, 16, CARD2);
-    }
-    draw_text(hdc, "\u{e8d6}", 40, 50, 88, 88, "Segoe MDL2 Assets", 34, 400, if m.present { WHITE } else { cr(142, 142, 152) }, DT_CENTER);
+    draw_art(hdc, 40, 50, 88, 16, 34, m.present);
     // title / artist
     let title = if m.present && !m.title.is_empty() { m.title.clone() } else if m.present { "Playing".into() } else { "Not Playing".into() };
     draw_text(hdc, &title, 146, 62, w - 190, 30, "Segoe UI", 20, 700, WHITE, DT_LEFT);
@@ -565,12 +656,7 @@ unsafe fn paint_music(hdc: HDC, w: i32, h: i32) {
 
 unsafe fn paint_lyrics(hdc: HDC, w: i32, h: i32, m: &media::MediaInfo) {
     // left compact player
-    if m.present {
-        fill_round(hdc, 26, 52, 56, 56, 12, cr(45, 60, 160));
-    } else {
-        fill_round(hdc, 26, 52, 56, 56, 12, CARD2);
-    }
-    draw_text(hdc, "\u{e8d6}", 26, 52, 56, 56, "Segoe MDL2 Assets", 22, 400, WHITE, DT_CENTER);
+    draw_art(hdc, 26, 52, 56, 12, 22, m.present);
     draw_text(hdc, &m.title.clone(), 94, 58, 190, 24, "Segoe UI", 15, 700, WHITE, DT_LEFT);
     if !m.artist.is_empty() {
         draw_text(hdc, &m.artist.clone(), 94, 82, 190, 20, "Segoe UI", 12, 400, DIM, DT_LEFT);
@@ -591,11 +677,11 @@ unsafe fn paint_lyrics(hdc: HDC, w: i32, h: i32, m: &media::MediaInfo) {
     // right red pane
     let px = 292;
     let pw = w - px - 14;
-    // simple vertical gradient
+    // simple vertical gradient (pane is 148 tall: 46..194)
     for i in 0..24 {
         let t = i as f64 / 24.0;
         let col = cr((61.0 - 33.0 * t) as u32, (18.0 - 10.0 * t) as u32, (32.0 - 16.0 * t) as u32);
-        fill_rect_c(hdc, px, 46 + (i * 140) / 24, pw, 140 / 24 + 1, col);
+        fill_rect_c(hdc, px, 46 + (i * 148) / 24, pw, 148 / 24 + 1, col);
     }
     // close
     draw_text(hdc, "✕", px + pw - 30, 48, 24, 22, "Segoe UI", 12, 400, DIM, DT_CENTER);
@@ -605,11 +691,19 @@ unsafe fn paint_lyrics(hdc: HDC, w: i32, h: i32, m: &media::MediaInfo) {
             draw_text(hdc, "Loading lyrics", px, 100, pw, 26, "Segoe UI", 14, 600, WHITE, DT_CENTER);
         }
         lyrics::LyricsState::NotAvailable => {
-            draw_text(hdc, "Lyrics not available", px, 100, pw, 26, "Segoe UI", 14, 600, WHITE, DT_CENTER);
+            draw_text(hdc, "Lyrics not available", px, 84, pw, 26, "Segoe UI", 14, 600, WHITE, DT_CENTER);
+            let why = lyrics::info();
+            if !why.is_empty() {
+                draw_text(hdc, &why, px + 10, 112, pw - 20, 36, "Segoe UI", 11, 400, DIM, DT_CENTER | DT_END_ELLIPSIS);
+            }
         }
         lyrics::LyricsState::Ready(lines) => {
+            if lyrics::info() == "unsynced lyrics" {
+                // no timestamps on LRCLIB for this track: lines follow the song roughly
+                draw_text(hdc, "unsynced", px + 10, 48, 90, 22, "Segoe UI", 10, 400, FAINT, DT_LEFT);
+            }
             let cur = lyrics::current_line(&lines, m.position_secs);
-            let mut row_y = 52;
+            let mut row_y = 56;
             for slot in 0..5i32 {
                 let idx = cur as i32 + slot - 2;
                 if idx >= 0 && (idx as usize) < lines.len() {
@@ -625,9 +719,75 @@ unsafe fn paint_lyrics(hdc: HDC, w: i32, h: i32, m: &media::MediaInfo) {
                     let ly = row_y;
                     add_action(px, ly, pw - 36, 24, A_LYRIC_LINE, (*t * 10.0) as i32);
                 }
-                row_y += 27;
+                row_y += 28;
             }
         }
+    }
+}
+
+// ---------- settings ----------
+fn autostart_enabled() -> bool {
+    unsafe {
+        let mut key: HKEY = std::mem::zeroed();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, wide(RUN_KEY).as_ptr(), 0, KEY_READ, &mut key) != 0 {
+            return false;
+        }
+        let r = RegQueryValueExW(key, wide(RUN_VALUE).as_ptr(), null(), null_mut(), null_mut(), null_mut());
+        RegCloseKey(key);
+        r == 0
+    }
+}
+
+// "Start with Windows": a per-user Run entry pointing at this exe.
+fn set_autostart(on: bool) {
+    unsafe {
+        let mut key: HKEY = std::mem::zeroed();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, wide(RUN_KEY).as_ptr(), 0, KEY_SET_VALUE, &mut key) != 0 {
+            return;
+        }
+        if on {
+            if let Ok(exe) = std::env::current_exe() {
+                let v = wide(&format!("\"{}\"", exe.display()));
+                RegSetValueExW(key, wide(RUN_VALUE).as_ptr(), 0, REG_SZ, v.as_ptr() as *const u8, (v.len() * 2) as u32);
+            }
+        } else {
+            RegDeleteValueW(key, wide(RUN_VALUE).as_ptr());
+        }
+        RegCloseKey(key);
+    }
+}
+
+unsafe fn paint_toggle_row(hdc: HDC, x0: i32, cw: i32, y: i32, title: &str, on: bool, code: i32) {
+    fill_round(hdc, x0, y, cw, 36, 14, CARD);
+    draw_text(hdc, title, x0 + 16, y, cw - 90, 36, "Segoe UI", 14, 600, WHITE, DT_LEFT);
+    let (tx, ty) = (x0 + cw - 16 - 44, y + 6);
+    fill_round(hdc, tx, ty, 44, 24, 24, if on { GREEN } else { cr(58, 58, 64) });
+    fill_circle(hdc, if on { tx + 44 - 12 } else { tx + 12 }, ty + 12, 9, WHITE);
+    add_action(x0, y, cw, 36, code, 0);
+}
+
+unsafe fn paint_settings(hdc: HDC, w: i32, _h: i32) {
+    let a = app();
+    let x0 = 44;
+    let cw = w - 88;
+    paint_toggle_row(hdc, x0, cw, 46, "Start with Windows", a.autostart, A_AUTOSTART);
+    paint_toggle_row(hdc, x0, cw, 86, "Reminder sounds", a.store.sounds, A_SOUNDS);
+    paint_toggle_row(hdc, x0, cw, 126, "Hide in full screen", a.store.hide_fs, A_HIDE_FS);
+    // Notch size: label + segmented control on one row
+    fill_round(hdc, x0, 166, cw, 40, 14, CARD);
+    draw_text(hdc, "Notch size", x0 + 16, 166, 100, 40, "Segoe UI", 14, 600, WHITE, DT_LEFT);
+    let sw = 64;
+    let seg_x = x0 + cw - 12 - sw * 5;
+    fill_round(hdc, seg_x, 172, sw * 5, 28, 28, cr(20, 20, 23));
+    let choices: [(i32, &str); 5] = [(0, "Auto"), (100, "100%"), (115, "115%"), (130, "130%"), (150, "150%")];
+    for (i, (val, label)) in choices.iter().enumerate() {
+        let sx = seg_x + i as i32 * sw;
+        let on = a.store.scale == *val;
+        if on {
+            fill_round(hdc, sx + 2, 174, sw - 4, 24, 24, cr(88, 88, 96));
+        }
+        draw_text(hdc, label, sx, 172, sw, 28, "Segoe UI", 12, if on { 650 } else { 500 }, if on { WHITE } else { DIM }, DT_CENTER);
+        add_action(sx, 172, sw, 28, A_SET_SCALE, *val);
     }
 }
 
@@ -728,7 +888,9 @@ unsafe fn paint_shelf(hdc: HDC, w: i32, h: i32) {
     }
     draw_text(hdc, "Drop more files anywhere on the notch", 40, 44, w - 80, 20, "Segoe UI", 12, 400, FAINT, DT_CENTER);
     let mut y = 70;
+    let mut shown = 0;
     for (i, item) in a.shelf_items.iter().enumerate() {
+        shown += 1;
         fill_round(hdc, 44, y, w - 88, 34, 11, CARD);
         draw_text(hdc, "\u{e8a5}", 54, y, 24, 34, "Segoe MDL2 Assets", 14, 400, DIM, DT_CENTER);
         draw_text(hdc, &item.name.clone(), 82, y, w - 200, 34, "Segoe UI", 13, 500, WHITE, DT_LEFT);
@@ -740,6 +902,11 @@ unsafe fn paint_shelf(hdc: HDC, w: i32, h: i32) {
         if y > h - 50 {
             break;
         }
+    }
+    // the notch height is fixed, so say when more files don't fit
+    if shown < a.shelf_items.len() {
+        let more = format!("+{} more", a.shelf_items.len() - shown);
+        draw_text(hdc, &more, 40, h - 50, w - 80, 16, "Segoe UI", 11, 400, FAINT, DT_CENTER);
     }
 }
 
@@ -771,8 +938,11 @@ unsafe fn paint_todo(hdc: HDC, w: i32, h: i32) {
         return;
     }
     let mut y = 60;
+    // while the inline editor is open it covers the bottom of the panel
+    let editing_box = !a.edit_hwnd.is_null() && IsWindowVisible(a.edit_hwnd) != 0;
+    let y_limit = if editing_box { h - 120 } else { h - 76 };
     for (i, t) in a.store.tasks.iter().enumerate() {
-        if y > h - 76 {
+        if y > y_limit {
             break;
         }
         fill_round(hdc, px + 10, y, pw - 20, 34, 11, if t.done { cr(30, 58, 36) } else { CARD2 });
@@ -799,13 +969,21 @@ unsafe fn paint_todo(hdc: HDC, w: i32, h: i32) {
 }
 
 // ---------- actions ----------
+unsafe fn hide_edit() {
+    let a = app();
+    if !a.edit_hwnd.is_null() && IsWindowVisible(a.edit_hwnd) != 0 {
+        ShowWindow(a.edit_hwnd, SW_HIDE);
+    }
+}
+
 unsafe fn goto_page(hwnd: HWND, page: usize) {
     let a = app();
     a.page = page % PAGES;
     a.lyrics_open = false;
+    a.settings_open = false;
     // the inline todo editor belongs to the todo page only
-    if a.page != 4 && !a.edit_hwnd.is_null() && IsWindowVisible(a.edit_hwnd) != 0 {
-        ShowWindow(a.edit_hwnd, SW_HIDE);
+    if a.page != 4 {
+        hide_edit();
     }
     apply_size(hwnd);
 }
@@ -832,6 +1010,35 @@ unsafe fn do_action(code: i32, param: i32, x: i32, _y: i32, hwnd: HWND) {
         A_PREV_PAGE => goto_page(hwnd, (a.page + PAGES - 1) % PAGES),
         A_NEXT_PAGE => goto_page(hwnd, (a.page + 1) % PAGES),
         A_DOT => goto_page(hwnd, param as usize),
+        A_SETTINGS => {
+            a.settings_open = !a.settings_open;
+            a.lyrics_open = false;
+            if a.settings_open {
+                a.autostart = autostart_enabled();
+                hide_edit();
+            }
+            apply_size(hwnd);
+        }
+        A_SET_SCALE => {
+            a.store.scale = param;
+            store::save(&a.store);
+            apply_size(hwnd);
+        }
+        A_AUTOSTART => {
+            set_autostart(!a.autostart);
+            a.autostart = autostart_enabled();
+        }
+        A_SOUNDS => {
+            a.store.sounds = !a.store.sounds;
+            store::save(&a.store);
+            if a.store.sounds {
+                MessageBeep(0x40); // preview the chime
+            }
+        }
+        A_HIDE_FS => {
+            a.store.hide_fs = !a.store.hide_fs;
+            store::save(&a.store);
+        }
         A_PLAYPAUSE => media::play_pause(media::snapshot().playing),
         A_NEXT_TRACK => media::next_track(),
         A_PREV_TRACK => media::prev_track(),
@@ -999,6 +1206,7 @@ unsafe fn collapse(hwnd: HWND) {
     if a.expanded && !edit_visible && !a.vol_drag {
         a.expanded = false;
         a.lyrics_open = false;
+        a.settings_open = false;
         a.dots_hover = false;
         apply_size(hwnd);
     }
@@ -1209,7 +1417,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             };
             ScreenToClient(hwnd, &mut p);
             let (x, y) = client_to_design(hwnd, p.x, p.y);
-            if msg == WM_MOUSEWHEEL && a.page == 0 && !a.lyrics_open && media::snapshot().present {
+            if msg == WM_MOUSEWHEEL && a.page == 0 && !a.lyrics_open && !a.settings_open && media::snapshot().present {
                 let (bx, bw) = vol_bar_geom();
                 if y >= 168 && y < 208 && x >= bx - 16 && x < bx + bw + 16 {
                     if let Some((lvl, _)) = media::volume_get() {
@@ -1253,6 +1461,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 a.pomo_left -= 1;
                 if a.pomo_left == 0 {
                     a.pomo_running = false;
+                    if a.store.sounds {
+                        MessageBeep(0x40);
+                    }
                     // auto-switch focus <-> break, paused, like the original cycle
                     if a.pomo_total == 1500 {
                         a.pomo_total = 300;
@@ -1263,6 +1474,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     }
                     a.pomo_left = a.pomo_total;
                 }
+            }
+            // hide while a full-screen app is running (games, video, slides)
+            let visible = IsWindowVisible(hwnd) != 0;
+            if a.store.hide_fs {
+                let mut st: i32 = 0;
+                let fs = SHQueryUserNotificationState(&mut st) >= 0 && matches!(st, 2 | 3 | 4);
+                if fs && visible {
+                    ShowWindow(hwnd, SW_HIDE);
+                } else if !fs && !visible {
+                    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                }
+            } else if !visible {
+                ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             }
             // water day rollover
             let today = today_string();
@@ -1317,6 +1541,11 @@ fn main() {
             expanded: false,
             page: 0,
             lyrics_open: false,
+            settings_open: false,
+            autostart: false,
+            thumb_gen: 0,
+            thumb_bmp: null_mut(),
+            thumb_size: 0,
             tracking: false,
             fonts: Vec::new(),
             actions: Vec::new(),

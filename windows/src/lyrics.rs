@@ -33,32 +33,37 @@ fn url_encode(s: &str) -> String {
     out
 }
 
+#[cfg(windows)]
 fn wide(s: &str) -> Vec<u16> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
 }
 
-fn http_get(host: &str, path: &str) -> Option<String> {
+// GET https://host/path -> Ok((http_status, body)) or Err(win32_error).
+// Tries the automatic (user/WPAD/PAC) proxy mode first, then the machine
+// default, so it works behind a system proxy as well as on a plain line.
+#[cfg(windows)]
+fn http_get(host: &str, path: &str) -> Result<(u32, String), u32> {
+    use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::Networking::WinHttp::*;
     unsafe {
-        let session = WinHttpOpen(
-            wide("Isle/0.2.0 (+https://lrclib.net)").as_ptr(),
-            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-        );
+        let ua = wide("Isle/0.2 (https://github.com/Sree-Ram-MS/Isle-Dynamic-Island-Extension)");
+        let mut session = WinHttpOpen(ua.as_ptr(), 4, std::ptr::null(), std::ptr::null(), 0);
         if session.is_null() {
-            return None;
+            session = WinHttpOpen(ua.as_ptr(), WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, std::ptr::null(), std::ptr::null(), 0);
+        }
+        if session.is_null() {
+            return Err(GetLastError());
         }
         // resolve / connect / send / receive timeouts so a dead network
         // can't leave the fetch thread hanging forever
         WinHttpSetTimeouts(session, 5000, 5000, 8000, 8000);
         let conn = WinHttpConnect(session, wide(host).as_ptr(), 443, 0);
         if conn.is_null() {
+            let e = GetLastError();
             WinHttpCloseHandle(session);
-            return None;
+            return Err(e);
         }
         let req = WinHttpOpenRequest(
             conn,
@@ -70,14 +75,27 @@ fn http_get(host: &str, path: &str) -> Option<String> {
             WINHTTP_FLAG_SECURE,
         );
         if req.is_null() {
+            let e = GetLastError();
             WinHttpCloseHandle(conn);
             WinHttpCloseHandle(session);
-            return None;
+            return Err(e);
         }
         let ok = WinHttpSendRequest(req, std::ptr::null(), 0, std::ptr::null(), 0, 0, 0) != 0
             && WinHttpReceiveResponse(req, std::ptr::null_mut()) != 0;
+        let err = if ok { 0 } else { GetLastError() };
+        let mut status: u32 = 0;
         let mut body = Vec::new();
         if ok {
+            // 19 = WINHTTP_QUERY_STATUS_CODE, 0x20000000 = ..._FLAG_NUMBER
+            let mut len: u32 = 4;
+            WinHttpQueryHeaders(
+                req,
+                19 | 0x2000_0000,
+                std::ptr::null(),
+                &mut status as *mut u32 as *mut core::ffi::c_void,
+                &mut len,
+                std::ptr::null_mut(),
+            );
             loop {
                 let mut avail: u32 = 0;
                 if WinHttpQueryDataAvailable(req, &mut avail) == 0 || avail == 0 {
@@ -96,43 +114,17 @@ fn http_get(host: &str, path: &str) -> Option<String> {
         WinHttpCloseHandle(conn);
         WinHttpCloseHandle(session);
         if ok {
-            String::from_utf8(body).ok()
+            Ok((status, String::from_utf8_lossy(&body).into_owned()))
         } else {
-            None
+            Err(err)
         }
     }
 }
 
-// Extract a JSON string field value (with escapes resolved) following `key`.
-fn json_string_after(hay: &str, key: &str, from: usize) -> Option<(String, usize)> {
-    let kpos = hay[from..].find(key)? + from + key.len();
-    let start = hay[kpos..].find('"')? + kpos + 1;
-    let mut out = String::new();
-    let mut chars = hay[start..].char_indices();
-    while let Some((i, c)) = chars.next() {
-        match c {
-            '"' => return Some((out, start + i + 1)),
-            '\\' => match chars.next() {
-                Some((_, 'n')) => out.push('\n'),
-                Some((_, 't')) => out.push('\t'),
-                Some((_, 'r')) => out.push('\r'),
-                Some((_, '/')) => out.push('/'),
-                Some((_, '"')) => out.push('"'),
-                Some((_, '\\')) => out.push('\\'),
-                Some((_, 'u')) => {
-                    let hex: String = chars.by_ref().take(4).map(|(_, c)| c).collect();
-                    if let Ok(n) = u32::from_str_radix(&hex, 16) {
-                        if let Some(ch) = char::from_u32(n) {
-                            out.push(ch);
-                        }
-                    }
-                }
-                _ => {}
-            },
-            _ => out.push(c),
-        }
-    }
-    None
+// Non-Windows stub so the parsing code can be unit-tested anywhere.
+#[cfg(not(windows))]
+fn http_get(_host: &str, _path: &str) -> Result<(u32, String), u32> {
+    Err(0)
 }
 
 fn json_number_after(hay: &str, key: &str, from: usize) -> Option<f64> {
@@ -182,23 +174,32 @@ fn strip_brackets(s: &str) -> String {
     out
 }
 
+// Strip YouTube-style decoration from a title/artist: everything from
+// "feat."/"ft." onwards, then trailing words like "Official Video". Only
+// *trailing* words go, so real titles ("Video Games", "Love Song") survive.
 fn clean_words(s: &str) -> String {
-    const STOP: &[&str] = &[
-        "lyrical", "lyric", "lyrics", "official", "video", "audio", "song", "songs",
-        "music", "hd", "4k", "full", "mv", "feat.", "ft.", "feat", "ft", "vevo",
+    const TRAIL: &[&str] = &[
+        "lyrical", "lyric", "lyrics", "official", "video", "audio", "music", "hd", "4k",
+        "full", "mv", "vevo", "visualizer",
     ];
-    s.split_whitespace()
-        .filter(|w| !STOP.contains(&w.to_lowercase().as_str()))
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim()
-        .to_string()
+    let mut words: Vec<&str> = s.split_whitespace().collect();
+    if let Some(i) = words.iter().position(|w| {
+        matches!(w.to_lowercase().trim_end_matches('.'), "feat" | "ft" | "featuring")
+    }) {
+        if i > 0 {
+            words.truncate(i);
+        }
+    }
+    while words.len() > 1 && TRAIL.contains(&words[words.len() - 1].to_lowercase().as_str()) {
+        words.pop();
+    }
+    words.join(" ").trim().to_string()
 }
 
 fn title_candidates(title: &str, artist: &str) -> Vec<(String, String)> {
     let first = title.split('|').next().unwrap_or(title);
     let t_full = clean_words(&strip_brackets(first));
-    let a_clean = clean_words(&strip_brackets(artist));
+    let a_clean = clean_words(&strip_brackets(artist.trim().trim_end_matches(" - Topic")));
     let mut out: Vec<(String, String)> = Vec::new();
     let mut push = |t: String, a: String, out: &mut Vec<(String, String)>| {
         if !t.is_empty() && !out.iter().any(|(x, y)| *x == t && *y == a) {
@@ -248,21 +249,15 @@ fn parse_json_string_at(hay: &str, q: usize) -> Option<(String, usize)> {
     None
 }
 
-// Find the best syncedLyrics in an /api/search response body.
-// Handles "syncedLyrics": null correctly (skips those results) and scores
-// each hit by how close its duration is to the playing track.
-fn find_synced(body: &str, duration_secs: f64) -> Option<Vec<(f64, String)>> {
-    let mut best: Option<(f64, String)> = None;
+// Find the best string value of `key` (e.g. "syncedLyrics") in an
+// /api/search response body: skips null / empty values and picks the hit
+// whose duration is closest to the playing track. Returns (value, duration).
+fn best_field(body: &str, key: &str, duration_secs: f64) -> Option<(String, f64)> {
+    let mut best: Option<(f64, String, f64)> = None; // (diff, value, duration)
     let mut pos = 0usize;
-    loop {
-        let key_rel = match body[pos..].find("\"syncedLyrics\"") {
-            Some(v) => v,
-            None => break,
-        };
+    while let Some(key_rel) = body[pos..].find(key) {
         let key_pos = pos + key_rel;
-        let after_key = key_pos + "\"syncedLyrics\"".len();
-        // value starts after ':' and whitespace; if it is not a string
-        // (e.g. null), skip this result.
+        let after_key = key_pos + key.len();
         let colon = match body[after_key..].find(':') {
             Some(c) => after_key + c,
             None => break,
@@ -271,11 +266,12 @@ fn find_synced(body: &str, duration_secs: f64) -> Option<Vec<(f64, String)>> {
         while vi < body.len() && (body.as_bytes()[vi] as char).is_whitespace() {
             vi += 1;
         }
+        // not a string (e.g. null): skip this result
         if vi >= body.len() || body.as_bytes()[vi] != b'"' {
             pos = after_key;
             continue;
         }
-        let (synced, next) = match parse_json_string_at(body, vi) {
+        let (value, next) = match parse_json_string_at(body, vi) {
             Some(v) => v,
             None => break,
         };
@@ -286,15 +282,38 @@ fn find_synced(body: &str, duration_secs: f64) -> Option<Vec<(f64, String)>> {
                 None => 0.0,
             }
         };
-        if !synced.trim().is_empty() {
+        if !value.trim().is_empty() {
             let diff = if duration_secs > 0.0 { (dur - duration_secs).abs() } else { 9999.0 };
-            if best.as_ref().map(|(d, _)| diff < *d).unwrap_or(true) {
-                best = Some((diff, synced));
+            if best.as_ref().map(|(d, _, _)| diff < *d).unwrap_or(true) {
+                best = Some((diff, value, dur));
             }
         }
         pos = next;
     }
-    best.map(|(_, s)| parse_lrc(&s)).filter(|v| !v.is_empty())
+    best.map(|(_, v, d)| (v, d))
+}
+
+fn find_synced(body: &str, duration_secs: f64) -> Option<Vec<(f64, String)>> {
+    best_field(body, "\"syncedLyrics\"", duration_secs)
+        .map(|(s, _)| parse_lrc(&s))
+        .filter(|v| !v.is_empty())
+}
+
+// Unsynced lyrics: no timestamps, so spread the lines evenly across the
+// track so the pane still follows the song roughly.
+fn find_plain(body: &str, duration_secs: f64) -> Option<Vec<(f64, String)>> {
+    let (text, dur) = best_field(body, "\"plainLyrics\"", duration_secs)?;
+    let lines: Vec<String> = text
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let total = if duration_secs > 0.0 { duration_secs } else { dur.max(lines.len() as f64 * 3.0) };
+    let step = total / lines.len() as f64;
+    Some(lines.into_iter().enumerate().map(|(i, l)| (i as f64 * step, l)).collect())
 }
 
 // When every request failed at the network level (offline, DNS, TLS), wait
@@ -323,6 +342,20 @@ fn search_path(track: &str, artist: &str) -> String {
     }
 }
 
+/// Short human-readable reason for the current lyrics state, shown under
+/// "Lyrics not available" so a failure can be diagnosed from the screen.
+pub static INFO: Mutex<String> = Mutex::new(String::new());
+
+pub fn info() -> String {
+    INFO.lock().map(|i| i.clone()).unwrap_or_default()
+}
+
+fn set_info(s: String) {
+    if let Ok(mut i) = INFO.lock() {
+        *i = s;
+    }
+}
+
 pub fn refetch(title: &str, artist: &str, duration_secs: f64) {
     if let Ok(mut k) = LYRICS_FOR.lock() {
         k.clear();
@@ -348,6 +381,7 @@ pub fn ensure_fetched(title: &str, artist: &str, duration_secs: f64) {
         if let Ok(mut l) = LYRICS.lock() {
             *l = LyricsState::Loading;
         }
+        set_info(String::new());
     }
     let candidates = title_candidates(title, artist);
     std::thread::spawn(move || {
@@ -359,15 +393,27 @@ pub fn ensure_fetched(title: &str, artist: &str, duration_secs: f64) {
             paths.push(format!("/api/search?q={}", url_encode(&q)));
         }
 
-        let mut found: Option<Vec<(f64, String)>> = None;
-        let mut got_response = false;
+        let mut synced: Option<Vec<(f64, String)>> = None;
+        let mut plain: Option<Vec<(f64, String)>> = None;
+        let mut responses = 0;
+        let mut last_status = 0u32;
+        let mut last_err = 0u32;
         for path in &paths {
-            if let Some(body) = http_get("lrclib.net", path) {
-                got_response = true;
-                if let Some(lines) = find_synced(&body, duration_secs) {
-                    found = Some(lines);
-                    break;
+            match http_get("lrclib.net", path) {
+                Ok((status, body)) => {
+                    responses += 1;
+                    last_status = status;
+                    if status == 200 {
+                        if let Some(lines) = find_synced(&body, duration_secs) {
+                            synced = Some(lines);
+                            break;
+                        }
+                        if plain.is_none() {
+                            plain = find_plain(&body, duration_secs);
+                        }
+                    }
                 }
+                Err(e) => last_err = e,
             }
         }
 
@@ -377,18 +423,29 @@ pub fn ensure_fetched(title: &str, artist: &str, duration_secs: f64) {
         if !still_current {
             return;
         }
-        if found.is_none() && !got_response {
+        let (state, note) = if let Some(lines) = synced {
+            (LyricsState::Ready(lines), String::new())
+        } else if let Some(lines) = plain {
+            (LyricsState::Ready(lines), "unsynced lyrics".to_string())
+        } else if responses == 0 {
             // network failure, not "no lyrics exist": allow a retry soon
             LAST_NET_FAIL_MS.store(now_ms(), Ordering::Relaxed);
             if let Ok(mut k) = LYRICS_FOR.lock() {
                 k.clear();
             }
-        }
+            (
+                LyricsState::NotAvailable,
+                format!("can't reach lrclib.net (error {}), retrying", last_err),
+            )
+        } else {
+            (
+                LyricsState::NotAvailable,
+                format!("no match on lrclib.net (HTTP {}) for \"{}\"", last_status, q),
+            )
+        };
+        set_info(note);
         if let Ok(mut l) = LYRICS.lock() {
-            *l = match found {
-                Some(lines) => LyricsState::Ready(lines),
-                None => LyricsState::NotAvailable,
-            };
+            *l = state;
         }
     });
 }
@@ -403,4 +460,65 @@ pub fn current_line(lines: &[(f64, String)], pos_secs: f64) -> usize {
         }
     }
     idx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Shape of a real LRCLIB /api/search response: several hits, one with
+    // "syncedLyrics": null, escapes and unicode inside the lyric text.
+    const BODY: &str = r#"[
+ {"id":1,"name":"Song","trackName":"Song","artistName":"A","albumName":"X","duration":200.0,"instrumental":false,
+  "plainLyrics":"wrong one\nsecond","syncedLyrics":null},
+ {"id":2,"name":"Song","trackName":"Song","artistName":"A","albumName":"Y","duration":231.4,"instrumental":false,
+  "plainLyrics":"hello \"world\"\nline two\n\nline three",
+  "syncedLyrics":"[ar:A]\n[00:12.50] hello \"world\"\n[00:20.00] caf\u00e9 line\n[01:02.25] last"}
+]"#;
+
+    #[test]
+    fn synced_picks_closest_duration_and_skips_null() {
+        let l = find_synced(BODY, 230.0).expect("synced lyrics");
+        assert_eq!(l.len(), 3, "metadata tag line must be skipped: {:?}", l);
+        assert_eq!(l[0], (12.5, "hello \"world\"".to_string()));
+        assert_eq!(l[1].1, "café line");
+        assert!((l[2].0 - 62.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn plain_fallback_spreads_lines_over_track() {
+        let body = r#"[{"duration":100.0,"plainLyrics":"a\nb\n\nc\nd","syncedLyrics":null}]"#;
+        assert!(find_synced(body, 100.0).is_none());
+        let l = find_plain(body, 100.0).expect("plain lyrics");
+        assert_eq!(l.len(), 4);
+        assert_eq!(l[0].0, 0.0);
+        assert!((l[3].0 - 75.0).abs() < 1e-9);
+        assert_eq!(current_line(&l, 50.0), 2);
+    }
+
+    #[test]
+    fn empty_and_garbage_bodies() {
+        assert!(find_synced("[]", 200.0).is_none());
+        assert!(find_synced("", 200.0).is_none());
+        assert!(find_plain("<html>502</html>", 200.0).is_none());
+    }
+
+    #[test]
+    fn candidates_for_youtube_style_titles() {
+        let c = title_candidates("Blinding Lights (Official Video) | The Weeknd", "The Weeknd - Topic");
+        assert_eq!(c[0], ("Blinding Lights".to_string(), "The Weeknd".to_string()));
+        assert!(c.iter().any(|(_, a)| a.is_empty()), "needs an artist-less fallback");
+        let c = title_candidates("Artist X - Song Y (Lyrical Video)", "SomeChannel");
+        assert_eq!(c[0].0, "Song Y");
+        let c = title_candidates("Video Games", "Lana Del Rey");
+        assert_eq!(c[0].0, "Video Games");
+        let c = title_candidates("Song Name Official Video feat. Someone", "X VEVO");
+        assert_eq!(c[0], ("Song Name".to_string(), "X".to_string()));
+    }
+
+    #[test]
+    fn search_path_omits_empty_artist() {
+        assert_eq!(search_path("a b", ""), "/api/search?track_name=a%20b");
+        assert_eq!(search_path("a", "b"), "/api/search?track_name=a&artist_name=b");
+    }
 }

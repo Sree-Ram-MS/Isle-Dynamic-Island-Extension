@@ -24,6 +24,9 @@ Current version: **0.2.2**
 - **Water** — +250 ml towards a 1.5 L daily goal, persisted per day.
 - **Shelf** — drag files in, click to open, remove with the × button.
 - **Todo** — add, check off, edit and delete tasks.
+- **Settings** (gear, top right) — start with Windows, reminder sounds,
+  hide in full screen, notch size (Auto / 100 / 115 / 130 / 150 %).
+  The opened notch has the same height on every page.
 
 Data is stored as plain text in `%LOCALAPPDATA%\Isle\data.txt`.
 Right-click the notch or press Esc to quit.
