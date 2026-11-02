@@ -1,4 +1,4 @@
-// Isle for Windows — native Rust v0.7.0
+// Isle for Windows — native Rust v0.8.0
 // The full app on the spike's skeleton: one top-edge window, one UI thread,
 // GDI drawing (double-buffered), real functionality per page:
 //   Music    — WinRT GSMTC (media.rs) + LRCLIB synced lyrics split-pane
@@ -31,7 +31,9 @@ use std::iter::once;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SYSTEMTIME, WPARAM};
+use windows_sys::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, SYSTEMTIME, WPARAM};
+use windows_sys::Win32::System::Threading::CreateMutexW;
+use windows_sys::Win32::UI::Shell::{Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_LARGE_ICON, NIIF_NOSOUND, NIIF_USER, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIN_BALLOONUSERCLICK, NOTIFYICONDATAW};
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -39,7 +41,7 @@ use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATU
 use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetTickCount64};
 use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
-    HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_SZ,
+    HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_SZ, RegDeleteTreeW,
 };
 use windows_sys::Win32::UI::HiDpi::{
     GetDpiForSystem, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -145,6 +147,15 @@ const A_BOTTLE: i32 = 91;
 const A_WATER_VIEW: i32 = 92;
 const A_WSET_BACK: i32 = 93;
 const A_TODO_RENAME: i32 = 94;
+const A_CLOSE_NOTCH: i32 = 95;
+const A_TODO_COMMIT: i32 = 96;
+const A_AUTO_HIDE: i32 = 97;
+const SLIDE_MS: u64 = 280;
+const WM_TRAY: u32 = WM_APP + 1;
+const WM_SHOW_NOTCH: u32 = WM_APP + 2;
+const TRAY_SHOW: usize = 1;
+const TRAY_SETTINGS: usize = 2;
+const TRAY_QUIT: usize = 3;
 
 // Settings window (Nusa Settings design), in design units (96-dpi pixels).
 const SET_W: i32 = 820;
@@ -248,8 +259,22 @@ struct App {
     // Water page: in-notch settings view, right-panel view (gauge/hours/week)
     water_settings: bool,
     water_view: u8,
-    // a file drag is over the notch
+    // a file drag is over the notch, and the files it carries
     drop_hover: bool,
+    drag_preview: Vec<ShelfItem>,
+    // pressed on a Shelf file: (index, screen x, screen y) until it drags
+    shelf_press: Option<(usize, i32, i32)>,
+    // page slide
+    sliding: bool,
+    slide_from: usize,
+    slide_dir: i32,
+    slide_start: u64,
+    // auto-hide: the minimized notch shows only after the top-centre hover
+    revealed: bool,
+    reveal_tick: u64,
+    tray_icon: isize,
+    // page a clicked notification opens
+    notify_page: usize,
 }
 
 static mut APP: Option<App> = None;
@@ -357,8 +382,9 @@ fn collapsed_size() -> (i32, i32) {
     // small by default; wider only for the timer ring or the lyric line
     match mini_mode() {
         Mini::Alert => (330, 62),
+        Mini::Hidden => (96, 4),
         Mini::Tab => (120, 16),
-        Mini::Lyric => (360, 34),
+        Mini::Lyric => (384, 34),
         Mini::Wide => if app().store.mini_player && music_playing() { (214, 34) } else { (186, 34) },
         Mini::Clock => if app().store.mini_player && music_playing() { (168, 34) } else { (140, 34) },
     }
@@ -534,8 +560,14 @@ unsafe fn apply_size(hwnd: HWND) {
 
 unsafe fn anim_step(hwnd: HWND) {
     let a = app();
+    if a.sliding && GetTickCount64().saturating_sub(a.slide_start) >= SLIDE_MS {
+        a.sliding = false;
+    }
     if !a.animating {
-        KillTimer(hwnd, TIMER_ANIM);
+        if !a.sliding {
+            KillTimer(hwnd, TIMER_ANIM);
+        }
+        present();
         return;
     }
     let t = ((GetTickCount64().saturating_sub(a.anim_start)) as f32 / a.anim_dur as f32).clamp(0.0, 1.0);
@@ -566,7 +598,11 @@ unsafe fn present() {
     a.presenting = true;
     let sc = expanded_scale() as f32 / 100.0;
     let (w, h) = a.cur_px;
-    let g = (glow_margin() as f32 * sc).ceil() as i32;
+    let g = if !a.expanded && !a.animating && mini_mode() == Mini::Hidden {
+        (14.0 * sc).ceil() as i32 // hover area around the shadow
+    } else {
+        (glow_margin() as f32 * sc).ceil() as i32
+    };
     let gap = top_gap();
     let (ww, wh) = (w + 2 * g, gap + h + g);
     let m = notch_monitor();
@@ -593,6 +629,37 @@ unsafe fn present() {
             collapsed_radius() as f32
         };
         let (wf, hf) = (w as f32, h as f32);
+        let hidden = !a.expanded && !a.animating && mini_mode() == Mini::Hidden;
+        if hidden {
+            // only a small soft shadow at the top centre; every pixel of the
+            // window keeps a little alpha so it still catches the pointer
+            gfx::fill_rect(0.0, 0.0, ww as f32, wh as f32, BLACK, 0.004);
+            let cx = ww as f32 / 2.0;
+            let sw = 120.0 * sc;
+            let sh = (wh as f32).min(22.0 * sc);
+            for i in 0..10 {
+                let k = i as f32 / 10.0;
+                let (rw, rh) = (sw * (1.0 - 0.45 * k), sh * (1.0 - 0.7 * k));
+                gfx::fill_round(cx - rw / 2.0, -rh, rw, rh * 2.0, rh, BLACK, 0.045);
+            }
+            let col = if a.store.glow { glow_color() } else { cr(160, 160, 166) };
+            gfx::fill_round(cx - 18.0 * sc, 3.0 * sc, 36.0 * sc, 3.0 * sc, 1.5 * sc, col, 0.75);
+            gfx::end();
+            let pos = POINT { x: wx, y: wy };
+            let size = windows_sys::Win32::Foundation::SIZE { cx: ww, cy: wh };
+            let src = POINT { x: 0, y: 0 };
+            let bf = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
+            UpdateLayeredWindow(a.hwnd, screen, &pos, &size, mem, &src, 0, &bf, ULW_ALPHA);
+            a.notch_off = (0, 0);
+            a.notch_k = 1.0;
+            a.win_pos = (wx, wy);
+            SelectObject(mem, old);
+            DeleteObject(dib as HGDIOBJ);
+            DeleteDC(mem);
+            ReleaseDC(null_mut(), screen);
+            a.presenting = false;
+            return;
+        }
         // soft glow: stacked translucent outlines fading outwards, in the
         // chosen colour, size and strength
         if a.store.glow && g > 0 {
@@ -656,6 +723,9 @@ unsafe fn present() {
 // Is this client pixel on the notch itself (not its glow)?
 fn in_notch(px: i32, py: i32) -> bool {
     let a = app();
+    if !a.expanded && !a.animating && mini_mode() == Mini::Hidden {
+        return true;
+    }
     let (ox, oy) = a.notch_off;
     px >= ox && px < ox + a.cur_px.0 && py >= oy && py < oy + a.cur_px.1
 }
@@ -849,15 +919,30 @@ unsafe fn paint(hdc: HDC, w: i32, h: i32, expanded: bool) {
         draw_text(hdc, PAGE_NAMES[page], 24, 0, 160, 44, "Segoe UI", 15, 700, page_color(page), DT_LEFT);
     }
     draw_clock(hdc, w / 2, 22, true);
-    // page
-    match page {
-        0 => paint_music(hdc, w, h),
-        1 => paint_lyrics(hdc, w, h),
-        2 => paint_pomo(hdc, w, h),
-        3 => paint_water(hdc, w, h),
-        4 => paint_shelf(hdc, w, h),
-        _ => paint_todo(hdc, w, h),
+    // page (sliding in from the side after a page change)
+    if a.sliding {
+        let t = (GetTickCount64().saturating_sub(a.slide_start) as f32 / SLIDE_MS as f32).clamp(0.0, 1.0);
+        let e = ease_out_cubic(t);
+        let d = a.slide_dir as f32 * w as f32;
+        let old = gfx::shift_x(-d * e);
+        gfx::push_opacity(1.0 - e * 0.6);
+        paint_page(hdc, w, h, a.slide_from);
+        gfx::pop();
+        gfx::restore(old);
+        let old = gfx::shift_x(d * (1.0 - e));
+        paint_page(hdc, w, h, page);
+        gfx::restore(old);
+        // only the new page's buttons count, and only once it is in place
+        a.actions.clear();
+    } else {
+        paint_page(hdc, w, h, page);
     }
+    // close button (top right): back to the minimized / hidden notch
+    let hov = a.hover.0 == A_CLOSE_NOTCH;
+    fill_circle(hdc, w - 30, 22, 11, if hov { cr(62, 62, 66) } else { cr(32, 32, 35) });
+    stroke(hdc, &[POINT { x: w - 34, y: 18 }, POINT { x: w - 26, y: 26 }], 2, cr(209, 209, 214));
+    stroke(hdc, &[POINT { x: w - 34, y: 26 }, POINT { x: w - 26, y: 18 }], 2, cr(209, 209, 214));
+    add_action(w - 44, 8, 28, 28, A_CLOSE_NOTCH, 0);
     // round chevrons
     let cy = h / 2 + 6;
     for (is_prev, cx) in [(true, 24), (false, w - 24)] {
@@ -868,6 +953,17 @@ unsafe fn paint(hdc: HDC, w: i32, h: i32, expanded: bool) {
         add_action(cx - 15, cy - 15, 30, 30, if is_prev { A_PREV_PAGE } else { A_NEXT_PAGE }, 0);
     }
     paint_dots(hdc, w, h);
+}
+
+unsafe fn paint_page(hdc: HDC, w: i32, h: i32, page: usize) {
+    match page {
+        0 => paint_music(hdc, w, h),
+        1 => paint_lyrics(hdc, w, h),
+        2 => paint_pomo(hdc, w, h),
+        3 => paint_water(hdc, w, h),
+        4 => paint_shelf(hdc, w, h),
+        _ => paint_todo(hdc, w, h),
+    }
 }
 
 // Bottom page dots (active one long, in the page colour) and the gear.
@@ -911,6 +1007,7 @@ unsafe fn paint_dots(hdc: HDC, w: i32, h: i32) {
 // What the minimized notch shows right now.
 #[derive(PartialEq, Clone, Copy)]
 enum Mini {
+    Hidden,
     Alert,
     Tab,
     Lyric,
@@ -939,6 +1036,9 @@ fn mini_mode() -> Mini {
     let a = app();
     if a.alert_until > 0 {
         return Mini::Alert;
+    }
+    if a.store.auto_hide && !a.revealed && a.popup_until == 0 && a.shelf_press.is_none() {
+        return Mini::Hidden;
     }
     let playing = a.store.mini_player && music_playing();
     if mini_lyric_line().is_some() {
@@ -983,20 +1083,24 @@ unsafe fn paint_collapsed(hdc: HDC, w: i32, h: i32) {
         Mini::Tab => {
             fill_circle(hdc, w / 2, cy, 3, cr(48, 209, 88));
         }
+        Mini::Hidden => {}
         mode => {
             let ring_on = a.pomo_running && mode != Mini::Lyric;
-            let wave_on = a.store.mini_player && music_playing();
+            // the wave always shows with the lyric line; next to the clock
+            // it follows "Music in the minimized notch"
+            let wave_on = music_playing() && (mode == Mini::Lyric || a.store.mini_player);
             if ring_on {
                 ring(hdc, 22, cy, 8, 3, pomo_frac(), cr(58, 42, 16), cr(255, 159, 10));
             }
-            if wave_on {
+            if mode == Mini::Lyric {
+                // wave on the left, the line centred in the rest
+                draw_wave(hdc, 18, cy);
+                let line = mini_lyric_line().unwrap_or_default();
+                draw_text(hdc, &line, 46, 0, w - 46 - 22, h, "Segoe UI", 13, 500, WHITE, DT_CENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+            } else if wave_on {
                 draw_wave(hdc, w - 16 - 18, cy);
             }
-            if mode == Mini::Lyric {
-                let line = mini_lyric_line().unwrap_or_default();
-                let text = if line == "\u{266a}" { line } else { format!("\u{266a}  {}", line) };
-                draw_text(hdc, &text, (w - 240) / 2, 0, 240, h, "Segoe UI", 13, 500, WHITE, DT_CENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-            } else {
+            if mode != Mini::Lyric {
                 let l = if ring_on { 36 } else { 0 };
                 let r = if wave_on { 34 } else { 0 };
                 draw_clock(hdc, (l + w - r) / 2, cy, false);
@@ -1517,57 +1621,90 @@ unsafe fn paint_water_settings(hdc: HDC, w: i32, _h: i32) {
 }
 
 // Shelf: one big dashed drop zone when empty; otherwise file tiles in a
-// row with a smaller drop tile at the end.
+// row with a smaller drop tile at the end. While files are dragged over the
+// notch they already show as tiles (outlined, with a +), before the drop.
+// Press and drag a tile to drop the file into another app.
+unsafe fn shelf_tile(hdc: HDC, tx: i32, ty: i32, tw: i32, th: i32, item: &ShelfItem, idx: i32, preview: bool) {
+    let a = app();
+    let grey = cr(142, 142, 147);
+    let hov = !preview && a.hover.1 == idx && (a.hover.0 == A_SHELF_OPEN || a.hover.0 == A_SHELF_REMOVE);
+    fill_round(hdc, tx, ty, tw, th, 32, if preview { cr(36, 30, 12) } else if hov { cr(40, 40, 44) } else { cr(28, 28, 31) });
+    if preview {
+        gfx::stroke_round(tx as f32 + 1.0, ty as f32 + 1.0, tw as f32 - 2.0, th as f32 - 2.0, 16.0, 1.5, true, page_color(4), 1.0);
+    }
+    let is_dir = std::fs::metadata(&item.path).map(|m| m.is_dir()).unwrap_or(false);
+    let (ic, glyph) = if is_dir { (cr(255, 176, 0), "\u{e8b7}") } else { (BLUE, "\u{e8a5}") };
+    fill_round(hdc, tx + tw / 2 - 22, ty + 16, 44, 44, 24, ic);
+    draw_text(hdc, glyph, tx + tw / 2 - 22, ty + 16, 44, 44, "Segoe MDL2 Assets", 20, 400, WHITE, DT_CENTER);
+    draw_text(hdc, &item.name.clone(), tx + 6, ty + 68, tw - 12, 18, "Segoe UI", 12, 500, WHITE, DT_CENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+    draw_text(hdc, &item.size.clone(), tx + 6, ty + 86, tw - 12, 16, "Segoe UI", 10, 400, grey, DT_CENTER);
+    if preview {
+        fill_circle(hdc, tx + tw - 13, ty + 13, 9, page_color(4));
+        draw_text(hdc, "+", tx + tw - 22, ty + 3, 18, 20, "Segoe UI", 13, 700, BLACK, DT_CENTER);
+        return;
+    }
+    add_action(tx, ty, tw, th, A_SHELF_OPEN, idx);
+    if hov {
+        fill_circle(hdc, tx + tw - 13, ty + 13, 9, cr(64, 64, 68));
+        draw_text(hdc, "\u{2715}", tx + tw - 22, ty + 4, 18, 18, "Segoe UI", 9, 600, WHITE, DT_CENTER);
+        add_action(tx + tw - 24, ty + 2, 22, 22, A_SHELF_REMOVE, idx);
+    }
+}
+
 unsafe fn paint_shelf(hdc: HDC, w: i32, _h: i32) {
     let a = app();
     let grey = cr(142, 142, 147);
-    let dash = cr(84, 84, 90);
-    let (zx, zy, zw, zh) = (48, 44, w - 96, 150);
     let over = a.drop_hover;
-    let dash = if over { page_color(4) } else { dash };
-    if a.shelf_items.is_empty() || over {
+    let dash = if over { page_color(4) } else { cr(84, 84, 90) };
+    let (zx, zy, zw, zh) = (48, 44, w - 96, 150);
+    let total = a.shelf_items.len() + if over { a.drag_preview.len() } else { 0 };
+    if total == 0 {
         let bg = if over { cr(36, 28, 6) } else { cr(14, 14, 16) };
         gfx::fill_round(zx as f32, zy as f32, zw as f32, zh as f32, 18.0, bg, 1.0);
         gfx::stroke_round(zx as f32 + 0.75, zy as f32 + 0.75, zw as f32 - 1.5, zh as f32 - 1.5, 18.0, if over { 2.0 } else { 1.5 }, true, dash, 1.0);
         let my = zy + zh / 2;
         draw_text(hdc, "\u{e896}", w / 2 - 20, my - 46, 40, 40, "Segoe MDL2 Assets", 28, 400, if over { page_color(4) } else { cr(225, 225, 230) }, DT_CENTER);
         draw_text(hdc, if over { "Release to add to the Shelf" } else { "Drop files here" }, zx, my - 2, zw, 22, "Segoe UI", 15, 600, WHITE, DT_CENTER);
-        let sub = if over { format!("{} on the Shelf", a.shelf_items.len()) } else { "Drag files onto the notch \u{00b7} click one to open it".to_string() };
-        draw_text(hdc, &sub, zx, my + 20, zw, 18, "Segoe UI", 11, 400, grey, DT_CENTER);
+        let sub = if over { "Already on the Shelf" } else { "Drag files onto the notch \u{00b7} drag them out to any app" };
+        draw_text(hdc, sub, zx, my + 20, zw, 18, "Segoe UI", 11, 400, grey, DT_CENTER);
         return;
     }
-    let n = a.shelf_items.len();
-    let shown = n.min(4);
+    let shown = total.min(4);
     let (tw, gap) = (86, 9);
     let ty = zy + 8;
     let th = zh - 16;
-    for (i, item) in a.shelf_items.iter().take(shown).enumerate() {
-        let tx = zx + i as i32 * (tw + gap);
-        let hov = a.hover.1 == i as i32 && (a.hover.0 == A_SHELF_OPEN || a.hover.0 == A_SHELF_REMOVE);
-        fill_round(hdc, tx, ty, tw, th, 32, if hov { cr(40, 40, 44) } else { cr(28, 28, 31) });
-        let is_dir = std::fs::metadata(&item.path).map(|m| m.is_dir()).unwrap_or(false);
-        let (ic, glyph) = if is_dir { (cr(255, 176, 0), "\u{e8b7}") } else { (BLUE, "\u{e8a5}") };
-        fill_round(hdc, tx + tw / 2 - 22, ty + 16, 44, 44, 24, ic);
-        draw_text(hdc, glyph, tx + tw / 2 - 22, ty + 16, 44, 44, "Segoe MDL2 Assets", 20, 400, WHITE, DT_CENTER);
-        draw_text(hdc, &item.name.clone(), tx + 6, ty + 68, tw - 12, 18, "Segoe UI", 12, 500, WHITE, DT_CENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-        draw_text(hdc, &item.size.clone(), tx + 6, ty + 86, tw - 12, 16, "Segoe UI", 10, 400, grey, DT_CENTER);
-        add_action(tx, ty, tw, th, A_SHELF_OPEN, i as i32);
-        if hov {
-            fill_circle(hdc, tx + tw - 13, ty + 13, 9, cr(64, 64, 68));
-            draw_text(hdc, "\u{2715}", tx + tw - 22, ty + 4, 18, 18, "Segoe UI", 9, 600, WHITE, DT_CENTER);
-            add_action(tx + tw - 24, ty + 2, 22, 22, A_SHELF_REMOVE, i as i32);
+    // previews first while dragging, so the new files are always visible
+    let mut slot = 0;
+    if over {
+        for item in a.drag_preview.iter().take(shown) {
+            let tx = zx + slot as i32 * (tw + gap);
+            shelf_tile(hdc, tx, ty, tw, th, item, -1, true);
+            slot += 1;
         }
+    }
+    for (i, item) in a.shelf_items.iter().enumerate() {
+        if slot >= shown {
+            break;
+        }
+        let tx = zx + slot as i32 * (tw + gap);
+        shelf_tile(hdc, tx, ty, tw, th, item, i as i32, false);
+        slot += 1;
     }
     // drop tile
     let dx = zx + shown as i32 * (tw + gap);
     let dw = zx + zw - dx;
+    if over {
+        gfx::fill_round(dx as f32, ty as f32, dw as f32, th as f32, 16.0, cr(36, 28, 6), 1.0);
+    }
     gfx::stroke_round(dx as f32 + 0.75, ty as f32 + 0.75, dw as f32 - 1.5, th as f32 - 1.5, 16.0, 1.5, true, dash, 1.0);
-    draw_text(hdc, "\u{e896}", dx, ty + 14, dw, 34, "Segoe MDL2 Assets", 20, 400, cr(225, 225, 230), DT_CENTER);
-    draw_text(hdc, "Drop files", dx, ty + 50, dw, 18, "Segoe UI", 12, 600, WHITE, DT_CENTER);
-    let more = if n > shown { format!("+{} more", n - shown) } else { "Click to open".to_string() };
+    draw_text(hdc, "\u{e896}", dx, ty + 14, dw, 34, "Segoe MDL2 Assets", 20, 400, if over { page_color(4) } else { cr(225, 225, 230) }, DT_CENTER);
+    draw_text(hdc, if over { "Release" } else { "Drop files" }, dx, ty + 50, dw, 18, "Segoe UI", 12, 600, WHITE, DT_CENTER);
+    let more = if total > shown { format!("+{} more", total - shown) } else if over { "to add".to_string() } else { "Drag out to share".to_string() };
     draw_text(hdc, &more, dx, ty + 68, dw, 16, "Segoe UI", 10, 400, grey, DT_CENTER);
-    let cw = text_width("Clear", "Segoe UI", 11, 600, hdc) + 20;
-    pill_btn(hdc, dx + (dw - cw) / 2, ty + th - 30, "Clear", 11, 600, 10, 22, cr(44, 44, 46), WHITE, A_SHELF_CLEAR, 0);
+    if !over {
+        let cw = text_width("Clear", "Segoe UI", 11, 600, hdc) + 20;
+        pill_btn(hdc, dx + (dw - cw) / 2, ty + th - 30, "Clear", 11, 600, 10, 22, cr(44, 44, 46), WHITE, A_SHELF_CLEAR, 0);
+    }
 }
 
 const TAG_COLORS: [u32; 5] = [cr(255, 69, 58), cr(10, 132, 255), cr(255, 159, 10), cr(191, 90, 242), cr(48, 209, 88)];
@@ -1577,6 +1714,8 @@ const TAG_COLORS: [u32; 5] = [cr(255, 69, 58), cr(10, 132, 255), cr(255, 159, 10
 // Edit mode: click a task to rename it, the cross deletes it.
 const TODO_CARD: (i32, i32, i32, i32) = (284, 50, 228, 138); // x, y, w, h
 const TODO_ROW_H: i32 = 30;
+
+const FIELD_BG: u32 = cr(44, 44, 48);
 
 fn todo_rows_visible() -> usize {
     ((TODO_CARD.3 - 16) / TODO_ROW_H) as usize
@@ -1666,6 +1805,21 @@ unsafe fn paint_todo(hdc: HDC, _w: i32, _h: i32) {
     if shown < n {
         draw_text(hdc, &format!("+{} more", n - shown), kx + 38, y, kw - 50, TODO_ROW_H - 4, "Segoe UI", 11, 500, grey, DT_LEFT);
     }
+    // the input field behind the edit box: rounded, blue outline, a save
+    // button at its right end
+    if edit_box {
+        let (fx, fy, fw, fh) = todo_edit_slot();
+        gfx::fill_round(fx as f32, fy as f32, fw as f32, fh as f32, fh as f32 / 2.0, FIELD_BG, 1.0);
+        gfx::stroke_round(fx as f32 + 0.75, fy as f32 + 0.75, fw as f32 - 1.5, fh as f32 - 1.5, fh as f32 / 2.0, 1.5, false, BLUE, 1.0);
+        let (bx, by) = (fx + fw - fh / 2 - 1, fy + fh / 2);
+        let hov = a.hover.0 == A_TODO_COMMIT;
+        fill_circle(hdc, bx, by, fh / 2 - 3, if hov { cr(64, 156, 255) } else { BLUE });
+        stroke(hdc, &[POINT { x: bx - 4, y: by }, POINT { x: bx - 1, y: by + 3 }, POINT { x: bx + 4, y: by - 3 }], 2, WHITE);
+        add_action(bx - fh / 2, fy, fh, fh, A_TODO_COMMIT, 0);
+        if a.store.tasks.is_empty() && a.edit_index.is_none() {
+            draw_text(hdc, "Enter to save \u{00b7} Esc to cancel", kx, fy + fh + 8, kw, 16, "Segoe UI", 10, 400, grey, DT_CENTER);
+        }
+    }
 }
 
 // Where the edit box goes (design units): the row it renames, or the next
@@ -1678,7 +1832,7 @@ fn todo_edit_slot() -> (i32, i32, i32, i32) {
         None => (a.store.tasks.len().min(todo_rows_visible() - 1)) as i32,
     };
     let row = row.min(todo_rows_visible() as i32 - 1);
-    (kx + 34, ky + 8 + row * TODO_ROW_H + 2, kw - 34 - 12, TODO_ROW_H - 6)
+    (kx + 10, ky + 8 + row * TODO_ROW_H, kw - 20, TODO_ROW_H - 2)
 }
 
 // ---------- settings ----------
@@ -1748,7 +1902,22 @@ fn step_page(dir: i32) -> usize {
 
 unsafe fn goto_page(hwnd: HWND, page: usize) {
     let a = app();
-    a.page = page % PAGES;
+    let page = page % PAGES;
+    if a.expanded && !a.animating && page != a.page {
+        // slide the old page out and the new one in
+        let pages = visible_pages();
+        let pos = |p: usize| pages.iter().position(|x| *x == p).unwrap_or(0) as i32;
+        a.slide_from = a.page;
+        a.slide_dir = if pos(page) >= pos(a.page) { 1 } else { -1 };
+        // wrapping around (last -> first with the next chevron) keeps going forward
+        if (pos(page) - pos(a.page)).abs() == pages.len() as i32 - 1 && pages.len() > 2 {
+            a.slide_dir = -a.slide_dir;
+        }
+        a.slide_start = GetTickCount64();
+        a.sliding = true;
+        SetTimer(hwnd, TIMER_ANIM, 10, None);
+    }
+    a.page = page;
     a.hover = (0, -1);
     a.water_settings = false;
     if a.page == 1 {
@@ -1850,6 +2019,22 @@ unsafe fn do_action(code: i32, param: i32, x: i32, _y: i32, hwnd: HWND) {
         }
         A_WATER_SETTINGS => a.water_settings = true,
         A_WSET_BACK => a.water_settings = false,
+        A_CLOSE_NOTCH => {
+            a.popup_until = 0;
+            a.hover = (0, -1);
+            hide_edit();
+            a.expanded = false;
+            a.revealed = false;
+            a.water_settings = false;
+            a.editing = false;
+            apply_size(hwnd);
+        }
+        A_TODO_COMMIT => commit_edit(),
+        A_AUTO_HIDE => {
+            a.store.auto_hide = !a.store.auto_hide;
+            store::save(&a.store);
+            apply_size(hwnd);
+        }
         A_WATER_VIEW => a.water_view = param.clamp(0, 2) as u8,
         A_BOTTLE => {
             a.store.bottle_ml = (a.store.bottle_ml + 50 * param).clamp(100, 5000);
@@ -2038,11 +2223,100 @@ unsafe fn do_action(code: i32, param: i32, x: i32, _y: i32, hwnd: HWND) {
     }
 }
 
+// ---------- tray icon + Windows notifications ----------
+fn taskbar_created_msg() -> u32 {
+    static mut MSG: u32 = 0;
+    unsafe {
+        if MSG == 0 {
+            MSG = RegisterWindowMessageW(wide("TaskbarCreated").as_ptr());
+        }
+        MSG
+    }
+}
+
+unsafe fn tray_data(hwnd: HWND) -> NOTIFYICONDATAW {
+    let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+    nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+    nid.hWnd = hwnd;
+    nid.uID = 1;
+    nid
+}
+
+fn copy_w(dst: &mut [u16], s: &str) {
+    let w: Vec<u16> = s.encode_utf16().take(dst.len() - 1).collect();
+    dst[..w.len()].copy_from_slice(&w);
+    dst[w.len()] = 0;
+}
+
+unsafe fn tray_add(hwnd: HWND) {
+    let a = app();
+    if a.tray_icon == 0 {
+        a.tray_icon = gfx::make_icon() as isize;
+    }
+    let mut nid = tray_data(hwnd);
+    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    nid.uCallbackMessage = WM_TRAY;
+    nid.hIcon = a.tray_icon as HICON;
+    copy_w(&mut nid.szTip, "Isle");
+    Shell_NotifyIconW(NIM_ADD, &nid);
+}
+
+unsafe fn tray_remove(hwnd: HWND) {
+    let nid = tray_data(hwnd);
+    Shell_NotifyIconW(NIM_DELETE, &nid);
+}
+
+// A Windows notification (shown as a toast on Windows 10/11) from the tray
+// icon; clicking it opens the notch on `page`.
+unsafe fn notify(title: &str, text: &str, page: usize) {
+    let a = app();
+    a.notify_page = page;
+    let mut nid = tray_data(a.hwnd);
+    nid.uFlags = NIF_INFO;
+    nid.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON | if a.store.sounds { 0 } else { NIIF_NOSOUND };
+    nid.hBalloonIcon = a.tray_icon as HICON;
+    copy_w(&mut nid.szInfoTitle, title);
+    copy_w(&mut nid.szInfo, text);
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+unsafe fn show_notch(hwnd: HWND, page: Option<usize>) {
+    let a = app();
+    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    if let Some(p) = page {
+        a.page = p;
+    }
+    a.revealed = true;
+    a.expanded = true;
+    a.popup_until = GetTickCount64() + 6000;
+    apply_size(hwnd);
+}
+
+unsafe fn tray_menu(hwnd: HWND) {
+    let m = CreatePopupMenu();
+    AppendMenuW(m, MF_STRING, TRAY_SHOW, wide("Open the notch").as_ptr());
+    AppendMenuW(m, MF_STRING, TRAY_SETTINGS, wide("Settings").as_ptr());
+    AppendMenuW(m, MF_SEPARATOR, 0, null());
+    AppendMenuW(m, MF_STRING, TRAY_QUIT, wide("Quit Isle").as_ptr());
+    let mut p = POINT { x: 0, y: 0 };
+    GetCursorPos(&mut p);
+    SetForegroundWindow(hwnd);
+    TrackPopupMenu(m, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, p.x, p.y, 0, hwnd, null());
+    PostMessageW(hwnd, WM_NULL, 0, 0);
+    DestroyMenu(m);
+}
+
 // ---------- dragging files onto the notch ----------
 // A file dragged over the notch opens it on the Shelf right away.
-unsafe fn drag_enter_cb() {
+unsafe fn drag_enter_cb(files: Vec<String>) {
     let a = app();
     a.drop_hover = true;
+    a.revealed = true;
+    a.drag_preview = files
+        .iter()
+        .filter(|p| !a.store.shelf.contains(p))
+        .map(|p| ShelfItem { path: p.clone(), size: file_size_str(p), name: p.rsplit(['\\', '/']).next().unwrap_or(p.as_str()).to_string() })
+        .collect();
     a.popup_until = 0;
     if a.page != 4 {
         goto_page(a.hwnd, 4);
@@ -2057,6 +2331,7 @@ unsafe fn drag_enter_cb() {
 unsafe fn drag_leave_cb() {
     let a = app();
     a.drop_hover = false;
+    a.drag_preview.clear();
     let mut p = POINT { x: 0, y: 0 };
     GetCursorPos(&mut p);
     let mut wr: RECT = std::mem::zeroed();
@@ -2070,6 +2345,7 @@ unsafe fn drag_leave_cb() {
 unsafe fn drop_cb(paths: Vec<String>) {
     let a = app();
     a.drop_hover = false;
+    a.drag_preview.clear();
     for path in paths {
         if !path.is_empty() && !a.store.shelf.contains(&path) {
             a.store.shelf.push(path);
@@ -2098,10 +2374,17 @@ unsafe fn show_edit(hwnd: HWND, index: Option<usize>) {
     a.edit_index = index;
     let (dw, dh) = expanded_size();
     let (pw, ph) = px_of((dw, dh), expanded_scale());
-    let (x, y, ew, eh) = todo_edit_slot();
-    // the edit box is its own small topmost window over the notch
+    let (fx, fy, fw, fh) = todo_edit_slot();
+    // the edit box is its own small borderless topmost window, inset into
+    // the field drawn on the notch (text only; the field is the notch's)
+    let sc = expanded_scale();
+    let fpx = 13 * sc / 100;
+    let (x, ew) = (fx + 12, fw - 12 - fh - 4);
     let (ox, oy) = (a.win_pos.0 + a.notch_off.0, a.win_pos.1 + a.notch_off.1);
-    SetWindowPos(a.edit_hwnd, HWND_TOPMOST, ox + x * pw / dw, oy + y * ph / dh, ew * pw / dw, eh * ph / dh, SWP_SHOWWINDOW);
+    let eh_px = fpx + 6;
+    let y_px = oy + (fy * ph / dh) + ((fh * ph / dh) - eh_px) / 2;
+    SendMessageW(a.edit_hwnd, WM_SETFONT, get_font("Segoe UI", fpx, 400) as WPARAM, 0);
+    SetWindowPos(a.edit_hwnd, HWND_TOPMOST, ox + x * pw / dw, y_px, ew * pw / dw, eh_px, SWP_SHOWWINDOW);
     let text = index.and_then(|i| a.store.tasks.get(i)).map(|t| t.title.clone()).unwrap_or_default();
     SetWindowTextW(a.edit_hwnd, wide(&text).as_ptr());
     SendMessageW(a.edit_hwnd, 0x00B1 /* EM_SETSEL */, 0, -1isize as LPARAM);
@@ -2166,7 +2449,13 @@ unsafe fn lparam_to_design(hwnd: HWND, lparam: LPARAM) -> (i32, i32) {
 unsafe fn collapse(hwnd: HWND) {
     let a = app();
     let edit_visible = !a.edit_hwnd.is_null() && IsWindowVisible(a.edit_hwnd) != 0;
-    if a.expanded && !edit_visible && !a.vol_drag {
+    if !a.expanded && a.revealed && !a.drop_hover && a.shelf_press.is_none() {
+        a.revealed = false;
+        apply_size(hwnd);
+        return;
+    }
+    if a.expanded && !edit_visible && !a.vol_drag && !a.drop_hover {
+        a.revealed = false;
         a.expanded = false;
         a.dots_hover = false;
         a.hover = (0, -1);
@@ -2244,7 +2533,7 @@ unsafe fn open_settings() {
         WS_EX_APPWINDOW,
         wide("IsleSettings").as_ptr(),
         wide("Isle Settings").as_ptr(),
-        WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX,
+        WS_POPUP | WS_SYSMENU,
         (sw - w) / 2, (sh - h) / 2, w, h,
         null_mut(), null_mut(), GetModuleHandleW(null()), null(),
     );
@@ -2451,13 +2740,12 @@ unsafe fn paint_settings_window(hdc: HDC, w: i32, h: i32) {
     fill_rect_c(hdc, 0, 0, w, h, S_WIN);
     fill_rect_c(hdc, 0, 0, SIDEBAR_W, h, S_SIDE);
     fill_rect_c(hdc, SIDEBAR_W, 0, 1, h, S_LINE);
-    // window lights: close, minimise, (zoom does nothing)
-    for (i, col) in [cr(255, 95, 87), cr(254, 188, 46), cr(40, 200, 64)].iter().enumerate() {
-        let cx = 24 + i as i32 * 20;
-        fill_circle(hdc, cx, 22, 6, *col);
-    }
-    add_action(14, 12, 20, 20, S_CLOSE, 0);
-    add_action(34, 12, 20, 20, S_MINIMIZE, 0);
+    // a single close button
+    let hov = a.settings_hover == -2;
+    fill_circle(hdc, 26, 24, 11, if hov { cr(255, 69, 58) } else { cr(52, 52, 55) });
+    stroke(hdc, &[POINT { x: 22, y: 20 }, POINT { x: 30, y: 28 }], 2, WHITE);
+    stroke(hdc, &[POINT { x: 22, y: 28 }, POINT { x: 30, y: 20 }], 2, WHITE);
+    add_action(12, 10, 28, 28, S_CLOSE, 0);
     // sidebar
     let sec = a.settings_section.min(SECTIONS.len() - 1);
     let last = SECTIONS.len() - 1;
@@ -2535,6 +2823,7 @@ unsafe fn paint_settings_window(hdc: HDC, w: i32, h: i32) {
                 row("Open the notch", "", seg(&[("Hover", 0), ("Click", 1)], st.open_click as i32, A_OPEN_MODE)),
                 row("Page icons", "Show page icons when you hover the page dots", RowKind::Switch(st.page_icons, A_PAGE_ICONS, true)),
             ]);
+            s_group(hdc, x0, cw, &mut y, &[row("Hide until hovered", "Only a small shadow at the top centre until you hover it", RowKind::Switch(st.auto_hide, A_AUTO_HIDE, true))]);
             s_h2(hdc, x0, cw, &mut y, "Glow");
             s_group(hdc, x0, cw, &mut y, &[
                 row("Glow", "A soft light around the notch", RowKind::Switch(st.glow, A_GLOW, true)),
@@ -2696,6 +2985,7 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
             let (x, y) = settings_to_design(hwnd, (lparam & 0xFFFF) as i16 as i32, ((lparam >> 16) & 0xFFFF) as i16 as i32);
             let hov = match settings_hit(x, y) {
                 Some((S_SECTION, p)) => p,
+                Some((S_CLOSE, _)) => -2,
                 _ => -1,
             };
             let a = app();
@@ -2703,7 +2993,7 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
                 a.settings_hover = hov;
                 inval(hwnd);
             }
-            if hov >= 0 {
+            if hov != -1 {
                 let mut tme = TRACKMOUSEEVENT {
                     cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
                     dwFlags: TME_LEAVE,
@@ -2775,7 +3065,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
                 wide("Edit").as_ptr(),
                 wide("").as_ptr(),
-                WS_POPUP | WS_BORDER,
+                WS_POPUP | 0x0080, // ES_AUTOHSCROLL, no border: the notch draws the field
                 0, 0, 10, 10,
                 hwnd,
                 null_mut(),
@@ -2788,14 +3078,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             SetWindowSubclass(edit, Some(edit_subclass), 1, 0);
             DragAcceptFiles(hwnd, 1);
             dnd::register(hwnd, dnd::Handlers { enter: drag_enter_cb, leave: drag_leave_cb, drop: drop_cb });
+            tray_add(hwnd);
             SetTimer(hwnd, TIMER_ID, 1000, None);
             0
         }
         WM_CTLCOLOREDIT => {
             let hdc = wparam as HDC;
             SetTextColor(hdc, WHITE);
-            SetBkColor(hdc, CARD2);
-            CreateSolidBrush(CARD2) as LRESULT
+            SetBkColor(hdc, FIELD_BG);
+            static mut FIELD_BRUSH: isize = 0;
+            if FIELD_BRUSH == 0 {
+                FIELD_BRUSH = CreateSolidBrush(FIELD_BG) as isize;
+            }
+            FIELD_BRUSH as LRESULT
         }
         WM_PAINT => {
             let mut ps: PAINTSTRUCT = std::mem::zeroed();
@@ -2818,6 +3113,36 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 a.tracking = true;
             }
             let (cpx, cpy) = ((lparam & 0xFFFF) as i16 as i32, ((lparam >> 16) & 0xFFFF) as i16 as i32);
+            // pressed on a Shelf file and moved: drag it out to other apps
+            if let Some((idx, sx, sy)) = a.shelf_press {
+                if (wparam & 0x0001) != 0 {
+                    let mut p = POINT { x: cpx, y: cpy };
+                    ClientToScreen(hwnd, &mut p);
+                    if (p.x - sx).abs() > GetSystemMetrics(SM_CXDRAG) || (p.y - sy).abs() > GetSystemMetrics(SM_CYDRAG) {
+                        a.shelf_press = None;
+                        ReleaseCapture();
+                        if let Some(item) = a.shelf_items.get(idx) {
+                            let path = item.path.clone();
+                            dnd::drag_out(hwnd, &[path]);
+                        }
+                        a.tracking = false;
+                        a.hover = (0, -1);
+                        let mut c = POINT { x: 0, y: 0 };
+                        GetCursorPos(&mut c);
+                        let mut wr: RECT = std::mem::zeroed();
+                        GetWindowRect(hwnd, &mut wr);
+                        if !(c.x >= wr.left && c.x < wr.right && c.y >= wr.top && c.y < wr.bottom) {
+                            collapse(hwnd);
+                        }
+                        inval(hwnd);
+                        return 0;
+                    }
+                    return 0;
+                } else {
+                    a.shelf_press = None;
+                    ReleaseCapture();
+                }
+            }
             if !in_notch(cpx, cpy) {
                 // on the glow: counts as outside
                 if a.expanded && !a.animating && !a.vol_drag {
@@ -2830,7 +3155,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 return 0;
             }
             if !a.expanded {
-                if !a.store.open_click {
+                if a.animating {
+                    return 0;
+                }
+                if mini_mode() == Mini::Hidden {
+                    // first hover at the top centre: show the minimized notch
+                    a.revealed = true;
+                    a.reveal_tick = GetTickCount64();
+                    apply_size(hwnd);
+                    return 0;
+                }
+                // hover again (keep moving on the minimized notch) to open it
+                let settled = !a.store.auto_hide || GetTickCount64().saturating_sub(a.reveal_tick) > 450;
+                if !a.store.open_click && settled {
                     a.expanded = true;
                     apply_size(hwnd);
                 }
@@ -2891,6 +3228,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     hit = Some(*code);
                 }
             }
+            if hit == Some(A_SHELF_OPEN) {
+                let mut idx = -1;
+                for (r, code, param) in &a.actions {
+                    if *code == A_SHELF_OPEN && x >= r.left && x < r.right && y >= r.top && y < r.bottom {
+                        idx = *param;
+                    }
+                }
+                if idx >= 0 {
+                    let mut p = POINT { x: (lparam & 0xFFFF) as i16 as i32, y: ((lparam >> 16) & 0xFFFF) as i16 as i32 };
+                    ClientToScreen(hwnd, &mut p);
+                    a.shelf_press = Some((idx as usize, p.x, p.y));
+                    SetCapture(hwnd);
+                }
+            }
             if hit == Some(A_VOL_BAR) {
                 a.vol_drag = true;
                 SetCapture(hwnd);
@@ -2904,6 +3255,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             1
         }
         WM_LBUTTONUP => {
+            if app().shelf_press.take().is_some() {
+                // a click, not a drag: falls through to open the file
+                ReleaseCapture();
+            }
             if app().vol_drag {
                 app().vol_drag = false;
                 ReleaseCapture();
@@ -3033,6 +3388,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     if a.store.sounds {
                         MessageBeep(0x40);
                     }
+                    let (title, text) = if a.pomo_mode == 0 {
+                        ("Focus session done", "Nice work. Time for a break.")
+                    } else {
+                        ("Break is over", "Ready for the next focus session?")
+                    };
+                    notify(title, text, 2);
+                    if !a.expanded {
+                        show_notch(hwnd, Some(2));
+                    }
                     // auto-switch focus <-> break, paused, like the original
                     // cycle; every 4th break is a long one
                     if a.pomo_mode == 0 {
@@ -3070,15 +3434,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 if until > from && hr >= from && hr < until {
                     // one sip reminder every 15 minutes (see water_plan)
                     let every_ms = 15 * 60_000u64;
-                    if now.saturating_sub(a.last_water_tick) >= every_ms && !a.expanded {
+                    if now.saturating_sub(a.last_water_tick) >= every_ms {
                         a.last_water_tick = now;
-                        a.page = 3;
-                        a.expanded = true;
-                        a.popup_until = now + 6000;
-                        if a.store.sounds {
-                            MessageBeep(0x40);
+                        let (_, sip) = water_plan();
+                        let left = (a.store.water_goal - a.store.water_ml).max(0);
+                        notify("Time for a sip of water", &format!("About {} ml now \u{00b7} {:.1} L to go today", sip, left as f64 / 1000.0), 3);
+                        if !a.expanded {
+                            a.page = 3;
+                            show_notch(hwnd, Some(3));
                         }
-                        apply_size(hwnd);
                     }
                 }
             }
@@ -3139,23 +3503,115 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             0
         }
         WM_RBUTTONUP => {
-            DestroyWindow(hwnd);
+            tray_menu(hwnd);
             0
         }
-        WM_KEYDOWN if wparam as u32 == 0x1B => {
-            DestroyWindow(hwnd);
+        WM_TRAY => {
+            let ev = (lparam & 0xFFFF) as u32;
+            match ev {
+                WM_LBUTTONUP => show_notch(hwnd, None),
+                WM_RBUTTONUP | WM_CONTEXTMENU => tray_menu(hwnd),
+                _ if ev == NIN_BALLOONUSERCLICK => show_notch(hwnd, Some(app().notify_page)),
+                _ => {}
+            }
+            0
+        }
+        WM_SHOW_NOTCH => {
+            show_notch(hwnd, None);
+            0
+        }
+        WM_COMMAND => {
+            let id = wparam & 0xFFFF;
+            let code = (wparam >> 16) & 0xFFFF;
+            if lparam as HWND == app().edit_hwnd && code == 0x0200 {
+                // EN_KILLFOCUS: clicking away saves the task
+                if IsWindowVisible(app().edit_hwnd) != 0 {
+                    commit_edit();
+                }
+                return 0;
+            }
+            match id {
+                TRAY_SHOW => show_notch(hwnd, None),
+                TRAY_SETTINGS => open_settings(),
+                TRAY_QUIT => {
+                    DestroyWindow(hwnd);
+                }
+                _ => {}
+            }
             0
         }
         WM_DESTROY => {
+            tray_remove(hwnd);
             PostQuitMessage(0);
+            0
+        }
+        _ if msg == taskbar_created_msg() && msg != 0 => {
+            // Explorer restarted: put the tray icon back
+            tray_add(hwnd);
             0
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
 
+const UNINSTALL_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Isle";
+
+// `Isle.exe --uninstall`, run from Settings > Apps (the installer registers
+// it): close Isle, remove the Start menu shortcut, the startup entry and the
+// uninstall entry, optionally the data, then delete the install folder.
+unsafe fn uninstall() {
+    let yes = 6;
+    let q = MessageBoxW(null_mut(), wide("Remove Isle from this PC?").as_ptr(), wide("Uninstall Isle").as_ptr(), MB_YESNO | MB_ICONQUESTION);
+    if q != yes {
+        return;
+    }
+    let h = FindWindowW(wide("IsleNativeNotch").as_ptr(), null());
+    if !h.is_null() {
+        PostMessageW(h, WM_CLOSE, 0, 0);
+        for _ in 0..30 {
+            if IsWindow(h) == 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+    set_autostart(false);
+    RegDeleteTreeW(HKEY_CURRENT_USER, wide(UNINSTALL_KEY).as_ptr());
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        let lnk = std::path::PathBuf::from(appdata).join("Microsoft\\Windows\\Start Menu\\Programs\\Isle.lnk");
+        let _ = std::fs::remove_file(lnk);
+    }
+    let d = MessageBoxW(null_mut(), wide("Also delete your Isle data (tasks, water history, Shelf list)?").as_ptr(), wide("Uninstall Isle").as_ptr(), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
+    if d == yes {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            let _ = std::fs::remove_dir_all(std::path::PathBuf::from(local).join("Isle"));
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            use std::os::windows::process::CommandExt;
+            let cmd = format!("ping 127.0.0.1 -n 3 > NUL & rmdir /s /q \"{}\"", dir.display());
+            let _ = std::process::Command::new("cmd").args(["/C", &cmd]).creation_flags(0x0800_0000).spawn();
+        }
+    }
+    MessageBoxW(null_mut(), wide("Isle was removed.").as_ptr(), wide("Uninstall Isle").as_ptr(), MB_OK | MB_ICONINFORMATION);
+}
+
 fn main() {
     unsafe {
+        if std::env::args().any(|a| a == "--uninstall") {
+            uninstall();
+            return;
+        }
+        // one Isle at a time: a second launch just opens the running notch
+        CreateMutexW(null(), 0, wide("Local\\IsleNotchSingleInstance").as_ptr());
+        if GetLastError() == 183 {
+            let h = FindWindowW(wide("IsleNativeNotch").as_ptr(), null());
+            if !h.is_null() {
+                PostMessageW(h, WM_SHOW_NOTCH, 0, 0);
+            }
+            return;
+        }
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         media::com_init_ui();
         gfx::init();
@@ -3225,6 +3681,16 @@ fn main() {
             water_settings: false,
             water_view: 0,
             drop_hover: false,
+            drag_preview: Vec::new(),
+            shelf_press: None,
+            sliding: false,
+            slide_from: 0,
+            slide_dir: 1,
+            slide_start: 0,
+            revealed: false,
+            reveal_tick: 0,
+            tray_icon: 0,
+            notify_page: 3,
             edit_hwnd: null_mut(),
         });
 

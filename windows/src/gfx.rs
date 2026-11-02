@@ -367,3 +367,56 @@ pub unsafe fn image(gen: u64, size: i32, bgra: &[u8], x: f32, y: f32, w: f32, h:
         gx.rt.DrawBitmap(b, Some(&rf(x, y, w, h)), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
     }
 }
+
+/// Shift what follows by `dx` design units (horizontally); returns the
+/// previous transform for `restore`. Used by the page slide.
+pub unsafe fn shift_x(dx: f32) -> Option<Matrix3x2> {
+    let gx = g()?;
+    let mut m = Matrix3x2::default();
+    gx.rt.GetTransform(&mut m);
+    let old = m;
+    m.M31 += dx * m.M11;
+    gx.rt.SetTransform(&m);
+    Some(old)
+}
+
+pub unsafe fn restore(m: Option<Matrix3x2>) {
+    if let (Some(gx), Some(m)) = (g(), m) {
+        gx.rt.SetTransform(&m);
+    }
+}
+
+/// A 32x32 app icon (black pill with a green dot) for the tray.
+pub unsafe fn make_icon() -> windows_sys::Win32::UI::WindowsAndMessaging::HICON {
+    use windows_sys::Win32::Graphics::Gdi::*;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, ICONINFO};
+    let n = 32;
+    let screen = GetDC(std::ptr::null_mut());
+    let mem = CreateCompatibleDC(screen);
+    let mut bi: BITMAPINFO = std::mem::zeroed();
+    bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+    bi.bmiHeader.biWidth = n;
+    bi.bmiHeader.biHeight = -n;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    let mut bits: *mut c_void = std::ptr::null_mut();
+    let dib = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+    let old = SelectObject(mem, dib as HGDIOBJ);
+    if begin(mem as _, n, n) {
+        fill_round(1.0, 8.0, 30.0, 16.0, 8.0, 0x000000, 1.0);
+        stroke_round(1.5, 8.5, 29.0, 15.0, 7.5, 1.0, false, 0x58D130, 1.0);
+        fill_circle(23.0, 16.0, 3.5, 0x58D130, 1.0);
+        fill_round(6.0, 14.5, 11.0, 3.0, 1.5, 0xFFFFFF, 1.0);
+        end();
+    }
+    SelectObject(mem, old);
+    let mask = CreateBitmap(n, n, 1, 1, std::ptr::null());
+    let ii = ICONINFO { fIcon: 1, xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: dib };
+    let icon = CreateIconIndirect(&ii);
+    DeleteObject(mask as HGDIOBJ);
+    DeleteObject(dib as HGDIOBJ);
+    DeleteDC(mem);
+    ReleaseDC(std::ptr::null_mut(), screen);
+    icon
+}

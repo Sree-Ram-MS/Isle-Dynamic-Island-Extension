@@ -1,2 +1,4 @@
 target/
 *.exe
+target-setup/
+installer/target/

@@ -1,0 +1,29 @@
+[package]
+name = "isle-setup"
+version = "0.8.0"
+edition = "2021"
+description = "Isle for Windows installer (per-user, no admin rights)"
+license = "MIT"
+
+# Build Isle first (../target/x86_64-pc-windows-gnu/release/isle.exe): the
+# installer carries it inside itself.
+
+[dependencies]
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_System_Com",
+  "Win32_UI_Shell",
+] }
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_System_Registry",
+  "Win32_Security",
+] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

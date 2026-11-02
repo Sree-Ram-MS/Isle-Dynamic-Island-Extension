@@ -64,6 +64,9 @@ pub struct Store {
     pub drink_ml: i32,   // ml added per Drink
     pub active_from: i32, // hour, reminders start
     pub active_until: i32, // hour, reminders stop
+    /// Hide the notch until the pointer reaches the top centre (only a small
+    /// shadow shows there); hovering it shows the minimized notch.
+    pub auto_hide: bool,
     /// Clear the Shelf every time Isle starts.
     pub empty_shelf: bool,
 }
@@ -107,6 +110,7 @@ pub fn load() -> Store {
     st.show_lyrics = true;
     st.lyrics_english = true;
     st.glow = true;
+    st.auto_hide = true;
     st.glow_size = 16;
     st.glow_strength = 100;
     st.bottle_ml = 750;
@@ -180,6 +184,7 @@ pub fn load() -> Store {
                     "active_from" => st.active_from = v.parse().unwrap_or(8).clamp(0, 23),
                     "active_until" => st.active_until = v.parse().unwrap_or(17).clamp(0, 23),
                     "empty_shelf" => st.empty_shelf = v != "0",
+                    "auto_hide" => st.auto_hide = v != "0",
                     "todo" => {
                         let (t, d) = v.rsplit_once('|').unwrap_or((v, "0"));
                         st.tasks.push(Task { title: t.to_string(), done: d == "1" });
@@ -218,6 +223,7 @@ pub fn save(st: &Store) {
     out.push_str(&format!("water_goal={}\ndrink_ml={}\nactive_from={}\nactive_until={}\nempty_shelf={}\n",
         st.water_goal, st.drink_ml, st.active_from, st.active_until, b(st.empty_shelf)));
     out.push_str(&format!("glow_color={}\nglow_size={}\nglow_strength={}\nbottle_ml={}\n", st.glow_color, st.glow_size, st.glow_strength, st.bottle_ml));
+    out.push_str(&format!("auto_hide={}\n", b(st.auto_hide)));
     let hist: Vec<String> = st.water_hist.iter().map(|(d, m)| format!("{}:{}", d, m)).collect();
     out.push_str(&format!("water_hist={}\n", hist.join(",")));
     let log: Vec<String> = st.water_log.iter().map(|(h, m)| format!("{}:{}", h, m)).collect();

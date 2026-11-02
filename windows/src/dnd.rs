@@ -67,7 +67,7 @@ struct DropTarget {
 
 /// What the notch does with a drag (set by main).
 pub struct Handlers {
-    pub enter: unsafe fn(),
+    pub enter: unsafe fn(Vec<String>),
     pub leave: unsafe fn(),
     pub drop: unsafe fn(Vec<String>),
 }
@@ -76,6 +76,8 @@ static VTBL: Vtbl = Vtbl { query_interface, add_ref, release, drag_enter, drag_o
 static mut TARGET: DropTarget = DropTarget { vtbl: &VTBL };
 static mut HANDLERS: Option<Handlers> = None;
 static mut ACCEPT: bool = false;
+// a drag that started on our own Shelf: never dropped back onto it
+static mut SELF_DRAG: bool = false;
 
 const IID_IUNKNOWN: GUID = GUID { data1: 0, data2: 0, data3: 0, data4: [0xC0, 0, 0, 0, 0, 0, 0, 0x46] };
 const IID_IDROPTARGET: GUID = GUID { data1: 0x122, data2: 0, data3: 0, data4: [0xC0, 0, 0, 0, 0, 0, 0, 0x46] };
@@ -153,13 +155,16 @@ unsafe fn effect(allowed: u32) -> u32 {
 }
 
 unsafe extern "system" fn drag_enter(_: *mut DropTarget, obj: *mut c_void, _keys: u32, _pt: PointL, eff: *mut u32) -> HRESULT {
-    ACCEPT = data_has_files(obj);
+    ACCEPT = !SELF_DRAG && data_has_files(obj);
     if !eff.is_null() {
         *eff = effect(*eff);
     }
     if ACCEPT {
+        // the file names are readable already while dragging: the Shelf
+        // shows them before the drop
+        let files = data_files(obj);
         if let Some(h) = (*(&raw const HANDLERS)).as_ref() {
-            (h.enter)();
+            (h.enter)(files);
         }
     }
     S_OK
@@ -173,7 +178,7 @@ unsafe extern "system" fn drag_over(_: *mut DropTarget, _keys: u32, _pt: PointL,
 }
 
 unsafe extern "system" fn drag_leave(_: *mut DropTarget) -> HRESULT {
-    if ACCEPT {
+    if ACCEPT || SELF_DRAG {
         ACCEPT = false;
         if let Some(h) = (*(&raw const HANDLERS)).as_ref() {
             (h.leave)();
@@ -205,4 +210,46 @@ pub unsafe fn register(hwnd: HWND, handlers: Handlers) -> bool {
         return false;
     }
     RegisterDragDrop(hwnd, (&raw mut TARGET) as *mut c_void) == S_OK
+}
+
+// ---------- dragging Shelf files out to other apps ----------
+#[link(name = "shell32")]
+extern "system" {
+    fn SHParseDisplayName(name: *const u16, bc: *mut c_void, pidl: *mut *mut c_void, sfgao_in: u32, sfgao_out: *mut u32) -> HRESULT;
+    fn SHCreateDataObject(folder: *const c_void, cidl: u32, apidl: *const *const c_void, inner: *mut c_void, riid: *const GUID, out: *mut *mut c_void) -> HRESULT;
+    fn SHDoDragDrop(hwnd: HWND, data: *mut c_void, src: *mut c_void, effects: u32, effect: *mut u32) -> HRESULT;
+    fn ILFree(pidl: *mut c_void);
+}
+
+const IID_IDATAOBJECT: GUID = GUID { data1: 0x10e, data2: 0, data3: 0, data4: [0xC0, 0, 0, 0, 0, 0, 0, 0x46] };
+
+/// Start a real shell drag of these files (Explorer, browsers, chat apps
+/// accept it). Blocks until the drop; offers copy and link, never move.
+pub unsafe fn drag_out(hwnd: HWND, paths: &[String]) {
+    let mut pidls: Vec<*mut c_void> = Vec::new();
+    for p in paths {
+        let w: Vec<u16> = p.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut pidl = null_mut();
+        if SHParseDisplayName(w.as_ptr(), null_mut(), &mut pidl, 0, null_mut()) == S_OK && !pidl.is_null() {
+            pidls.push(pidl);
+        }
+    }
+    if pidls.is_empty() {
+        return;
+    }
+    let mut obj: *mut c_void = null_mut();
+    let list: Vec<*const c_void> = pidls.iter().map(|p| *p as *const c_void).collect();
+    if SHCreateDataObject(std::ptr::null(), list.len() as u32, list.as_ptr(), null_mut(), &IID_IDATAOBJECT, &mut obj) == S_OK && !obj.is_null() {
+        SELF_DRAG = true;
+        let mut eff = 0u32;
+        SHDoDragDrop(hwnd, obj, null_mut(), DROPEFFECT_COPY | DROPEFFECT_LINK, &mut eff);
+        SELF_DRAG = false;
+        // IUnknown::Release (vtable slot 2)
+        let vt = *(obj as *const *const usize);
+        let rel: unsafe extern "system" fn(*mut c_void) -> u32 = std::mem::transmute(*vt.add(2));
+        rel(obj);
+    }
+    for p in pidls {
+        ILFree(p);
+    }
 }
