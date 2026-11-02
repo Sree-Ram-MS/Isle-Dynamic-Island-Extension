@@ -1,4 +1,4 @@
-// Isle for Windows — native Rust v0.8.0
+// Isle for Windows — native Rust v0.9.0
 // The full app on the spike's skeleton: one top-edge window, one UI thread,
 // GDI drawing (double-buffered), real functionality per page:
 //   Music    — WinRT GSMTC (media.rs) + LRCLIB synced lyrics split-pane
@@ -24,6 +24,7 @@ mod lyrics;
 mod media;
 mod gfx;
 mod store;
+mod sysinfo;
 mod translit;
 
 use std::ffi::OsStr;
@@ -33,6 +34,8 @@ use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, SYSTEMTIME, WPARAM};
 use windows_sys::Win32::System::Threading::CreateMutexW;
+use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
 use windows_sys::Win32::UI::Shell::{Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_LARGE_ICON, NIIF_NOSOUND, NIIF_USER, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIN_BALLOONUSERCLICK, NOTIFYICONDATAW};
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
@@ -150,6 +153,20 @@ const A_TODO_RENAME: i32 = 94;
 const A_CLOSE_NOTCH: i32 = 95;
 const A_TODO_COMMIT: i32 = 96;
 const A_AUTO_HIDE: i32 = 97;
+const A_CAL_PREV: i32 = 110;
+const A_CAL_NEXT: i32 = 111;
+const A_CAL_DAY: i32 = 112;
+const A_CAL_ADD: i32 = 113;
+const A_CAL_DEL: i32 = 114;
+const A_CAL_TODAY: i32 = 115;
+const A_SHOW_SYSMON: i32 = 116;
+const A_SHOW_CAL: i32 = 117;
+const A_INDICATORS: i32 = 118;
+const A_NOTIF_POPUP: i32 = 119;
+const WM_LOCKKEY: u32 = WM_APP + 3;
+const WM_NETCHANGE: u32 = WM_APP + 4;
+const WM_TOAST: u32 = WM_APP + 5;
+const HIDE_DELAY_MS: u64 = 3000;
 const SLIDE_MS: u64 = 280;
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_SHOW_NOTCH: u32 = WM_APP + 2;
@@ -163,7 +180,7 @@ const SET_H: i32 = 640;
 const SIDEBAR_W: i32 = 228;
 // (name, icon glyph, tile colour); Water's droplet is drawn by hand.
 // About is pinned to the bottom of the sidebar.
-const SECTIONS: [(&str, &str, u32); 9] = [
+const SECTIONS: [(&str, &str, u32); 10] = [
     ("General", "\u{e713}", cr(142, 142, 147)),
     ("Display", "\u{e7f4}", cr(94, 92, 230)),
     ("Appearance", "\u{e790}", cr(58, 58, 60)),
@@ -172,10 +189,11 @@ const SECTIONS: [(&str, &str, u32); 9] = [
     ("Pomodoro", "\u{e916}", cr(255, 159, 10)),
     ("Water", "", cr(10, 132, 255)),
     ("Shelf", "\u{e7b8}", cr(255, 176, 0)),
+    ("Pages and alerts", "\u{ea8f}", cr(255, 69, 58)),
     ("About", "\u{e946}", cr(99, 99, 102)),
 ];
 
-const PAGES: usize = 6; // 0 Music, 1 Lyrics, 2 Focus timer, 3 Water, 4 Shelf, 5 To-do
+const PAGES: usize = 8; // 0 Music, 1 Lyrics, 2 Focus timer, 3 Water, 4 Shelf, 5 To-do, 6 System Monitor, 7 Calendar
 
 
 // The opened notch has the same height on every page.
@@ -275,6 +293,29 @@ struct App {
     tray_icon: isize,
     // page a clicked notification opens
     notify_page: usize,
+    last_own_notify: u64,
+    // auto-hide: when the revealed mini notch goes away again
+    hide_at: u64,
+    // popups in the minimized notch: 0 charging, 1 indicator / notification
+    alert_kind: u8,
+    ind_glyph: String,
+    ind_title: String,
+    ind_sub: String,
+    ind_color: u32,
+    // lock keys, Wi-Fi SSID ("" = not connected), connected Bluetooth devices
+    caps: bool,
+    num: bool,
+    scroll: bool,
+    wifi: Option<String>,
+    bt: Option<Vec<String>>,
+    net_known: bool,
+    sys: sysinfo::Reading,
+    // Calendar page: shown month and selected day
+    cal_y: i32,
+    cal_m: i32,
+    cal_sel: (i32, i32, i32),
+    // what the edit box is for: 0 a task, 1 a Calendar reminder
+    edit_target: u8,
 }
 
 static mut APP: Option<App> = None;
@@ -381,7 +422,7 @@ fn collapsed_size() -> (i32, i32) {
     // Design units (Nusa Notch design): a floating pill.
     // small by default; wider only for the timer ring or the lyric line
     match mini_mode() {
-        Mini::Alert => (330, 62),
+        Mini::Alert => if app().alert_kind == 1 { (300, 48) } else { (330, 62) },
         Mini::Hidden => (96, 4),
         Mini::Tab => (120, 16),
         Mini::Lyric => (384, 34),
@@ -774,18 +815,28 @@ fn page_color(p: usize) -> u32 {
         2 => cr(255, 159, 10),
         3 => cr(10, 132, 255),
         4 => cr(255, 176, 0),
+        6 => cr(60, 198, 244),
+        7 => cr(255, 69, 58),
         _ => cr(48, 209, 88),
     }
 }
 
-const PAGE_NAMES: [&str; PAGES] = ["Music", "Lyrics", "Pomodoro", "Water", "Shelf", "To-do"];
+const PAGE_NAMES: [&str; PAGES] = ["Music", "Lyrics", "Pomodoro", "Water", "Shelf", "To-do", "System Monitor", "Calendar"];
 // Page icons shown on the bottom dots while hovering them ("" = droplet).
-const PAGE_ICONS: [&str; PAGES] = ["\u{e8d6}", "\u{e8e4}", "\u{e916}", "", "\u{e7b8}", "\u{e73e}"];
+const PAGE_ICONS: [&str; PAGES] = ["\u{e8d6}", "\u{e8e4}", "\u{e916}", "", "\u{e7b8}", "\u{e73e}", "\u{e9d9}", "\u{e787}"];
 
 // Pages reachable with the chevrons, dots, wheel and swipe (Lyrics only
 // when lyrics are turned on in Settings).
 fn visible_pages() -> Vec<usize> {
-    (0..PAGES).filter(|p| *p != 1 || app().store.show_lyrics).collect()
+    let st = &app().store;
+    (0..PAGES)
+        .filter(|p| match p {
+            1 => st.show_lyrics,
+            6 => st.show_sysmon,
+            7 => st.show_calendar,
+            _ => true,
+        })
+        .collect()
 }
 
 fn mix(a: u32, b: u32, t: f64) -> u32 {
@@ -937,7 +988,36 @@ unsafe fn paint(hdc: HDC, w: i32, h: i32, expanded: bool) {
     } else {
         paint_page(hdc, w, h, page);
     }
+    // status icons in the header, right to left before the close button
+    {
+        let mut ix = w - 52;
+        let blue = cr(10, 132, 255);
+        let icon = |ix: &mut i32, glyph: &str, col: u32| {
+            *ix -= 22;
+            draw_text(hdc, glyph, *ix, 12, 20, 20, "Segoe MDL2 Assets", 12, 400, col, DT_CENTER);
+        };
+        let badge = |ix: &mut i32, t: &str| {
+            *ix -= 22;
+            gfx::fill_round(*ix as f32 + 2.0, 13.0, 18.0, 18.0, 5.0, cr(48, 48, 52), 1.0);
+            draw_text(hdc, t, *ix + 2, 13, 18, 18, "Segoe UI", 10, 700, WHITE, DT_CENTER);
+        };
+        match a.wifi.as_deref() {
+            Some("") => icon(&mut ix, "\u{eb5e}", cr(110, 110, 115)),
+            Some(_) => icon(&mut ix, "\u{e701}", WHITE),
+            None => {}
+        }
+        if let Some(bt) = &a.bt {
+            icon(&mut ix, "\u{e702}", if bt.is_empty() { cr(110, 110, 115) } else { blue });
+        }
+        if a.num {
+            badge(&mut ix, "1");
+        }
+        if a.caps {
+            badge(&mut ix, "A");
+        }
+    }
     // close button (top right): back to the minimized / hidden notch
+
     let hov = a.hover.0 == A_CLOSE_NOTCH;
     fill_circle(hdc, w - 30, 22, 11, if hov { cr(62, 62, 66) } else { cr(32, 32, 35) });
     stroke(hdc, &[POINT { x: w - 34, y: 18 }, POINT { x: w - 26, y: 26 }], 2, cr(209, 209, 214));
@@ -962,9 +1042,166 @@ unsafe fn paint_page(hdc: HDC, w: i32, h: i32, page: usize) {
         2 => paint_pomo(hdc, w, h),
         3 => paint_water(hdc, w, h),
         4 => paint_shelf(hdc, w, h),
-        _ => paint_todo(hdc, w, h),
+        5 => paint_todo(hdc, w, h),
+        6 => paint_sysmon(hdc, w, h),
+        _ => paint_calendar(hdc, w, h),
     }
 }
+
+// System Monitor (as on the GNOME page): CPU, RAM, GPU on the left;
+// network up/down and the system drive on the right.
+unsafe fn sys_tile(hdc: HDC, x: i32, y: i32, w: i32, h: i32, tag: &str, color: u32, label: &str, value: &str, bar: Option<f64>) {
+    gfx::fill_round(x as f32, y as f32, w as f32, h as f32, 12.0, cr(28, 28, 31), 1.0);
+    gfx::fill_round((x + 9) as f32, (y + 9) as f32, 28.0, 28.0, 8.0, mix(color, BLACK, 0.72), 1.0);
+    draw_text(hdc, tag, x + 9, y + 9, 28, 28, "Segoe UI", 9, 700, color, DT_CENTER);
+    draw_text(hdc, label, x + 46, y + 6, w - 56, 14, "Segoe UI", 9, 600, cr(142, 142, 147), DT_LEFT);
+    draw_text(hdc, value, x + 46, y + 18, w - 56, 18, "Segoe UI", 13, 600, WHITE, DT_LEFT | DT_END_ELLIPSIS);
+    if let Some(f) = bar {
+        let bw = (w - 58) as f32;
+        gfx::fill_round((x + 46) as f32, (y + 37) as f32, bw, 4.0, 2.0, cr(52, 52, 56), 1.0);
+        gfx::fill_round((x + 46) as f32, (y + 37) as f32, (bw * (f / 100.0).clamp(0.0, 1.0) as f32).max(4.0), 4.0, 2.0, color, 1.0);
+    }
+}
+
+unsafe fn paint_sysmon(hdc: HDC, w: i32, _h: i32) {
+    let r = app().sys.clone();
+    let (cyan, amber, red) = (cr(60, 198, 244), cr(240, 180, 41), cr(239, 83, 80));
+    let gb = |b: u64| b as f64 / 1073741824.0;
+    let (x0, y0, gap, th) = (40, 48, 6, 45);
+    let cw = (w - 80 - 10) / 2;
+    let x1 = x0 + cw + 10;
+    let ram_pct = if r.ram_total > 0 { 100.0 * r.ram_used as f64 / r.ram_total as f64 } else { 0.0 };
+    let disk_pct = if r.disk_total > 0 { 100.0 * r.disk_used as f64 / r.disk_total as f64 } else { 0.0 };
+    sys_tile(hdc, x0, y0, cw, th, "CPU", cyan, "CPU", &format!("{:.0}%", r.cpu), Some(r.cpu));
+    sys_tile(hdc, x0, y0 + th + gap, cw, th, "RAM", amber, "RAM", &format!("{:.1} / {:.1} GB", gb(r.ram_used), gb(r.ram_total)), Some(ram_pct));
+    let gpu = r.gpu.map(|g| format!("{:.0}%", g)).unwrap_or_else(|| "N/A".into());
+    sys_tile(hdc, x0, y0 + 2 * (th + gap), cw, th, "GPU", red, "GPU", &gpu, Some(r.gpu.unwrap_or(0.0)));
+    sys_tile(hdc, x1, y0, cw, th, "\u{2191}", cyan, "NET UP", &sysinfo::fmt_rate(r.up), None);
+    sys_tile(hdc, x1, y0 + th + gap, cw, th, "\u{2193}", cyan, "NET DOWN", &sysinfo::fmt_rate(r.down), None);
+    sys_tile(hdc, x1, y0 + 2 * (th + gap), cw, th, "SSD", cyan, "DISK", &format!("{:.0}% \u{00b7} {:.0} / {:.0} GB", disk_pct, gb(r.disk_used), gb(r.disk_total)), Some(disk_pct));
+}
+
+// Calendar: the selected date on the left, the month grid in the middle,
+// that day's reminders (with + Add) on the right.
+const CAL_LIST: (i32, i32, i32) = (344, 78, 192); // x, y, width
+const CAL_ROW_H: i32 = 26;
+
+fn cal_events(key: &str) -> Vec<usize> {
+    let a = app();
+    let mut v: Vec<usize> = (0..a.store.events.len()).filter(|i| a.store.events[*i].date == key).collect();
+    v.sort_by_key(|i| a.store.events[*i].min);
+    v
+}
+
+fn cal_edit_slot() -> (i32, i32, i32, i32) {
+    let (sy, sm, sd) = app().cal_sel;
+    let n = cal_events(&date_key(sy, sm, sd)).len().min(3) as i32;
+    let (x, y, w) = CAL_LIST;
+    (x, y + n * CAL_ROW_H, w, CAL_ROW_H - 2)
+}
+
+unsafe fn draw_field(hdc: HDC, slot: (i32, i32, i32, i32)) {
+    let a = app();
+    let (fx, fy, fw, fh) = slot;
+    gfx::fill_round(fx as f32, fy as f32, fw as f32, fh as f32, fh as f32 / 2.0, FIELD_BG, 1.0);
+    gfx::stroke_round(fx as f32 + 0.75, fy as f32 + 0.75, fw as f32 - 1.5, fh as f32 - 1.5, fh as f32 / 2.0, 1.5, false, BLUE, 1.0);
+    let (bx, by) = (fx + fw - fh / 2 - 1, fy + fh / 2);
+    let hov = a.hover.0 == A_TODO_COMMIT;
+    fill_circle(hdc, bx, by, fh / 2 - 3, if hov { cr(64, 156, 255) } else { BLUE });
+    stroke(hdc, &[POINT { x: bx - 4, y: by }, POINT { x: bx - 1, y: by + 3 }, POINT { x: bx + 4, y: by - 3 }], 2, WHITE);
+    add_action(bx - fh / 2, fy, fh, fh, A_TODO_COMMIT, 0);
+}
+
+unsafe fn paint_calendar(hdc: HDC, _w: i32, _h: i32) {
+    let a = app();
+    let grey = cr(142, 142, 147);
+    let red = page_color(7);
+    let (ty, tm, td) = today_ymd();
+    let (sy, sm, sd) = a.cal_sel;
+    // left: selected date
+    let lx = 40;
+    draw_text(hdc, &MONTHS[(sm - 1) as usize].to_uppercase(), lx, 56, 100, 16, "Segoe UI", 11, 700, red, DT_LEFT);
+    draw_text(hdc, WEEKDAYS[weekday(sy, sm, sd) as usize], lx, 72, 100, 20, "Segoe UI", 14, 600, WHITE, DT_LEFT);
+    draw_text(hdc, &sd.to_string(), lx - 2, 90, 100, 60, "Segoe UI", 46, 700, WHITE, DT_LEFT);
+    if (sy, sm, sd) != (ty, tm, td) {
+        let hov = a.hover.0 == A_CAL_TODAY;
+        pill_btn(hdc, lx, 156, "Today", 11, 600, 10, 22, if hov { cr(60, 60, 64) } else { cr(40, 40, 44) }, WHITE, A_CAL_TODAY, 0);
+    }
+    // middle: month grid
+    let gx = 146;
+    let cw = 26;
+    let gw = cw * 7;
+    let hov_p = a.hover.0 == A_CAL_PREV;
+    let hov_n = a.hover.0 == A_CAL_NEXT;
+    draw_text(hdc, "\u{e76b}", gx, 46, 20, 20, "Segoe MDL2 Assets", 9, 400, if hov_p { WHITE } else { grey }, DT_CENTER);
+    add_action(gx - 4, 44, 28, 24, A_CAL_PREV, 0);
+    draw_text(hdc, "\u{e76c}", gx + gw - 20, 46, 20, 20, "Segoe MDL2 Assets", 9, 400, if hov_n { WHITE } else { grey }, DT_CENTER);
+    add_action(gx + gw - 24, 44, 28, 24, A_CAL_NEXT, 0);
+    draw_text(hdc, &format!("{} {}", MONTHS[(a.cal_m - 1) as usize], a.cal_y), gx + 20, 46, gw - 40, 20, "Segoe UI", 12, 600, WHITE, DT_CENTER);
+    for (i, dch) in ["S", "M", "T", "W", "T", "F", "S"].iter().enumerate() {
+        draw_text(hdc, dch, gx + i as i32 * cw, 66, cw, 16, "Segoe UI", 9, 600, grey, DT_CENTER);
+    }
+    let first = weekday(a.cal_y, a.cal_m, 1);
+    let nd = days_in_month(a.cal_y, a.cal_m);
+    for d in 1..=nd {
+        let idx = first + d - 1;
+        let (col, row) = (idx % 7, idx / 7);
+        let cx = gx + col * cw + cw / 2;
+        let cy = 90 + row * 18;
+        let is_today = (a.cal_y, a.cal_m, d) == (ty, tm, td);
+        let is_sel = (a.cal_y, a.cal_m, d) == (sy, sm, sd);
+        let hov = a.hover.0 == A_CAL_DAY && a.hover.1 == d;
+        if is_today {
+            fill_circle(hdc, cx, cy, 8, red);
+        } else if is_sel {
+            fill_circle(hdc, cx, cy, 8, cr(64, 64, 70));
+        } else if hov {
+            fill_circle(hdc, cx, cy, 8, cr(44, 44, 48));
+        }
+        if is_sel && is_today {
+            gfx::stroke_round((cx - 9) as f32, (cy - 9) as f32, 18.0, 18.0, 9.0, 1.2, false, WHITE, 1.0);
+        }
+        let fg = if is_today || is_sel { WHITE } else if col == 0 { cr(200, 120, 120) } else { cr(220, 220, 225) };
+        draw_text(hdc, &d.to_string(), cx - 12, cy - 8, 24, 16, "Segoe UI", 10, if is_today { 700 } else { 500 }, fg, DT_CENTER);
+        if !is_today && a.store.events.iter().any(|e| e.date == date_key(a.cal_y, a.cal_m, d)) {
+            fill_circle(hdc, cx, cy + 8, 1, red);
+        }
+        add_action(cx - cw / 2, cy - 9, cw, 18, A_CAL_DAY, d);
+    }
+    // right: reminders for the selected day
+    let (rx, ry, rw) = CAL_LIST;
+    draw_text(hdc, "Reminders", rx, 46, 120, 22, "Segoe UI", 12, 600, grey, DT_LEFT);
+    let hov_a = a.hover.0 == A_CAL_ADD;
+    let aw = 58;
+    fill_round(hdc, rx + rw - aw, 46, aw, 22, 22, if hov_a { cr(255, 99, 88) } else { red });
+    draw_text(hdc, "+ Add", rx + rw - aw, 46, aw, 22, "Segoe UI", 11, 600, WHITE, DT_CENTER);
+    add_action(rx + rw - aw, 46, aw, 22, A_CAL_ADD, 0);
+    let key = date_key(sy, sm, sd);
+    let list = cal_events(&key);
+    let edit_box = !a.edit_hwnd.is_null() && IsWindowVisible(a.edit_hwnd) != 0 && a.edit_target == 1;
+    if list.is_empty() && !edit_box {
+        draw_text(hdc, "No reminders", rx, ry + 14, rw, 18, "Segoe UI", 12, 500, cr(110, 110, 115), DT_CENTER);
+        draw_text(hdc, "Add one with a time, like 14:30 Call", rx, ry + 34, rw, 16, "Segoe UI", 10, 400, cr(90, 90, 95), DT_CENTER);
+    }
+    let max_rows = if edit_box { 3 } else { 4 };
+    for (row, ei) in list.iter().take(max_rows).enumerate() {
+        let e = &a.store.events[*ei];
+        let y = ry + row as i32 * CAL_ROW_H;
+        let hov = a.hover.1 == *ei as i32 && a.hover.0 == A_CAL_DEL;
+        gfx::fill_round(rx as f32, y as f32, rw as f32, (CAL_ROW_H - 4) as f32, 8.0, cr(28, 28, 31), 1.0);
+        draw_text(hdc, &fmt_min(e.min), rx + 8, y, 50, CAL_ROW_H - 4, "Segoe UI", 10, 700, if e.fired { grey } else { red }, DT_LEFT);
+        draw_text(hdc, &e.title.clone(), rx + 58, y, rw - 58 - 26, CAL_ROW_H - 4, "Segoe UI", 12, 500, if e.fired { grey } else { WHITE }, DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+        draw_text(hdc, "\u{2715}", rx + rw - 24, y, 20, CAL_ROW_H - 4, "Segoe UI", 9, 600, if hov { WHITE } else { cr(90, 90, 95) }, DT_CENTER);
+        add_action(rx + rw - 26, y, 26, CAL_ROW_H - 4, A_CAL_DEL, *ei as i32);
+    }
+    if list.len() > max_rows {
+        draw_text(hdc, &format!("+{} more", list.len() - max_rows), rx, ry + max_rows as i32 * CAL_ROW_H, rw, 16, "Segoe UI", 10, 500, grey, DT_CENTER);
+    }
+    if edit_box {
+        draw_field(hdc, cal_edit_slot());
+    }
+}
+
 
 // Bottom page dots (active one long, in the page colour) and the gear.
 // Hovering them turns each dot into a small pill with the page icon.
@@ -1037,7 +1274,10 @@ fn mini_mode() -> Mini {
     if a.alert_until > 0 {
         return Mini::Alert;
     }
-    if a.store.auto_hide && !a.revealed && a.popup_until == 0 && a.shelf_press.is_none() {
+    // auto-hide: stay hidden unless something is going on (a lyric line,
+    // music in the mini player, a running timer)
+    let busy = mini_lyric_line().is_some() || a.pomo_running || (a.store.mini_player && music_playing());
+    if a.store.auto_hide && !a.revealed && a.popup_until == 0 && a.shelf_press.is_none() && !busy {
         return Mini::Hidden;
     }
     let playing = a.store.mini_player && music_playing();
@@ -1064,6 +1304,17 @@ unsafe fn paint_collapsed(hdc: HDC, w: i32, h: i32) {
     let a = app();
     let cy = h / 2;
     match mini_mode() {
+        Mini::Alert if a.alert_kind == 1 => {
+            // indicator / notification popup: round icon, title, subtitle
+            fill_circle(hdc, 28, cy, 14, mix(a.ind_color, BLACK, 0.75));
+            draw_text(hdc, &a.ind_glyph.clone(), 14, cy - 14, 28, 28, "Segoe MDL2 Assets", 13, 400, a.ind_color, DT_CENTER);
+            if a.ind_sub.is_empty() {
+                draw_text(hdc, &a.ind_title.clone(), 52, 0, w - 70, h, "Segoe UI", 13, 600, WHITE, DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+            } else {
+                draw_text(hdc, &a.ind_title.clone(), 52, cy - 17, w - 70, 18, "Segoe UI", 13, 600, WHITE, DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+                draw_text(hdc, &a.ind_sub.clone(), 52, cy + 1, w - 70, 16, "Segoe UI", 11, 400, cr(161, 161, 166), DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+            }
+        }
         Mini::Alert => {
             // "Charging" popup
             let pct = battery().map(|b| b.0).unwrap_or(0);
@@ -1757,7 +2008,7 @@ unsafe fn paint_todo(hdc: HDC, _w: i32, _h: i32) {
     // list card
     let (kx, ky, kw, kh) = TODO_CARD;
     gfx::fill_round(kx as f32, ky as f32, kw as f32, kh as f32, 18.0, cr(30, 30, 33), 1.0);
-    let edit_box = !a.edit_hwnd.is_null() && IsWindowVisible(a.edit_hwnd) != 0;
+    let edit_box = !a.edit_hwnd.is_null() && IsWindowVisible(a.edit_hwnd) != 0 && a.edit_target == 0;
     if a.store.tasks.is_empty() && !edit_box {
         let mx = kx + kw / 2;
         gfx::fill_round((mx - 21) as f32, (ky + 30) as f32, 42.0, 42.0, 11.0, cr(52, 52, 56), 1.0);
@@ -1808,14 +2059,8 @@ unsafe fn paint_todo(hdc: HDC, _w: i32, _h: i32) {
     // the input field behind the edit box: rounded, blue outline, a save
     // button at its right end
     if edit_box {
-        let (fx, fy, fw, fh) = todo_edit_slot();
-        gfx::fill_round(fx as f32, fy as f32, fw as f32, fh as f32, fh as f32 / 2.0, FIELD_BG, 1.0);
-        gfx::stroke_round(fx as f32 + 0.75, fy as f32 + 0.75, fw as f32 - 1.5, fh as f32 - 1.5, fh as f32 / 2.0, 1.5, false, BLUE, 1.0);
-        let (bx, by) = (fx + fw - fh / 2 - 1, fy + fh / 2);
-        let hov = a.hover.0 == A_TODO_COMMIT;
-        fill_circle(hdc, bx, by, fh / 2 - 3, if hov { cr(64, 156, 255) } else { BLUE });
-        stroke(hdc, &[POINT { x: bx - 4, y: by }, POINT { x: bx - 1, y: by + 3 }, POINT { x: bx + 4, y: by - 3 }], 2, WHITE);
-        add_action(bx - fh / 2, fy, fh, fh, A_TODO_COMMIT, 0);
+        let (_fx, fy, _fw, fh) = todo_edit_slot();
+        draw_field(hdc, todo_edit_slot());
         if a.store.tasks.is_empty() && a.edit_index.is_none() {
             draw_text(hdc, "Enter to save \u{00b7} Esc to cancel", kx, fy + fh + 8, kw, 16, "Segoe UI", 10, 400, grey, DT_CENTER);
         }
@@ -1918,6 +2163,9 @@ unsafe fn goto_page(hwnd: HWND, page: usize) {
         SetTimer(hwnd, TIMER_ANIM, 10, None);
     }
     a.page = page;
+    if page == 6 {
+        a.sys = sysinfo::poll();
+    }
     a.hover = (0, -1);
     a.water_settings = false;
     if a.page == 1 {
@@ -2025,11 +2273,57 @@ unsafe fn do_action(code: i32, param: i32, x: i32, _y: i32, hwnd: HWND) {
             hide_edit();
             a.expanded = false;
             a.revealed = false;
+            a.hide_at = 0;
             a.water_settings = false;
             a.editing = false;
             apply_size(hwnd);
         }
         A_TODO_COMMIT => commit_edit(),
+        A_CAL_PREV | A_CAL_NEXT => {
+            let k = if code == A_CAL_PREV { -1 } else { 1 };
+            let mi = a.cal_y * 12 + (a.cal_m - 1) + k;
+            a.cal_y = mi.div_euclid(12);
+            a.cal_m = mi.rem_euclid(12) + 1;
+            hide_edit();
+        }
+        A_CAL_DAY => {
+            a.cal_sel = (a.cal_y, a.cal_m, param);
+            hide_edit();
+        }
+        A_CAL_TODAY => {
+            let (y, m, d) = today_ymd();
+            a.cal_y = y;
+            a.cal_m = m;
+            a.cal_sel = (y, m, d);
+            hide_edit();
+        }
+        A_CAL_ADD => show_cal_edit(hwnd),
+        A_CAL_DEL => {
+            if (param as usize) < a.store.events.len() {
+                a.store.events.remove(param as usize);
+                store::save(&a.store);
+            }
+        }
+        A_SHOW_SYSMON | A_SHOW_CAL => {
+            if code == A_SHOW_SYSMON {
+                a.store.show_sysmon = !a.store.show_sysmon;
+            } else {
+                a.store.show_calendar = !a.store.show_calendar;
+            }
+            if !visible_pages().contains(&a.page) {
+                a.page = 0;
+            }
+            store::save(&a.store);
+        }
+        A_INDICATORS => {
+            a.store.indicators = !a.store.indicators;
+            store::save(&a.store);
+        }
+        A_NOTIF_POPUP => {
+            a.store.notif_popup = !a.store.notif_popup;
+            store::save(&a.store);
+        }
+
         A_AUTO_HIDE => {
             a.store.auto_hide = !a.store.auto_hide;
             store::save(&a.store);
@@ -2271,6 +2565,7 @@ unsafe fn tray_remove(hwnd: HWND) {
 unsafe fn notify(title: &str, text: &str, page: usize) {
     let a = app();
     a.notify_page = page;
+    a.last_own_notify = GetTickCount64();
     let mut nid = tray_data(a.hwnd);
     nid.uFlags = NIF_INFO;
     nid.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON | if a.store.sounds { 0 } else { NIIF_NOSOUND };
@@ -2304,6 +2599,225 @@ unsafe fn tray_menu(hwnd: HWND) {
     TrackPopupMenu(m, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, p.x, p.y, 0, hwnd, null());
     PostMessageW(hwnd, WM_NULL, 0, 0);
     DestroyMenu(m);
+}
+
+// ---------- status indicators and other apps' notifications ----------
+// A short popup in the minimized notch (skipped while the notch is open:
+// the header shows the same state).
+unsafe fn show_indicator(glyph: &str, title: &str, sub: &str, color: u32, ms: u64) {
+    let a = app();
+    if a.expanded {
+        inval(a.hwnd);
+        return;
+    }
+    a.alert_kind = 1;
+    a.ind_glyph = glyph.to_string();
+    a.ind_title = title.to_string();
+    a.ind_sub = sub.to_string();
+    a.ind_color = color;
+    a.alert_until = GetTickCount64() + ms;
+    apply_size(a.hwnd);
+}
+
+static mut KEY_DOWN: [bool; 3] = [false; 3];
+
+// Low-level keyboard hook: only watches Caps, Num and Scroll Lock presses.
+unsafe extern "system" fn kb_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code >= 0 {
+        let k = &*(lparam as *const KBDLLHOOKSTRUCT);
+        let slot = match k.vkCode {
+            0x14 => Some(0),
+            0x90 => Some(1),
+            0x91 => Some(2),
+            _ => None,
+        };
+        if let Some(i) = slot {
+            let down = wparam as u32 == WM_KEYDOWN || wparam as u32 == WM_SYSKEYDOWN;
+            let kd = &mut *(&raw mut KEY_DOWN);
+            if down && !kd[i] {
+                PostMessageW(app().hwnd, WM_LOCKKEY, k.vkCode as WPARAM, 0);
+            }
+            kd[i] = down;
+        }
+    }
+    CallNextHookEx(null_mut(), code, wparam, lparam)
+}
+
+unsafe fn on_lock_key(vk: usize) {
+    let a = app();
+    let (name, on) = match vk {
+        0x14 => {
+            a.caps = !a.caps;
+            ("Caps Lock", a.caps)
+        }
+        0x90 => {
+            a.num = !a.num;
+            ("Num Lock", a.num)
+        }
+        _ => {
+            a.scroll = !a.scroll;
+            ("Scroll Lock", a.scroll)
+        }
+    };
+    if a.store.indicators {
+        let glyph = match vk { 0x14 => "\u{e84b}", 0x90 => "\u{e765}", _ => "\u{e8cb}" };
+        show_indicator(glyph, name, if on { "On" } else { "Off" }, if on { cr(48, 209, 88) } else { cr(142, 142, 147) }, 1800);
+    }
+    inval(a.hwnd);
+}
+
+static NET: std::sync::Mutex<Option<(Option<String>, Option<Vec<String>>)>> = std::sync::Mutex::new(None);
+
+// Wi-Fi and Bluetooth are polled off the UI thread every 3 s; a change is
+// posted to the notch.
+fn start_net_watch(hwnd: HWND) {
+    let h = hwnd as isize;
+    std::thread::spawn(move || {
+        let mut last: Option<(Option<String>, Option<Vec<String>>)> = None;
+        loop {
+            let now = (sysinfo::wifi(), sysinfo::bluetooth());
+            if last.as_ref() != Some(&now) {
+                *NET.lock().unwrap() = Some(now.clone());
+                unsafe {
+                    PostMessageW(h as HWND, WM_NETCHANGE, 0, 0);
+                }
+                last = Some(now);
+            }
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        }
+    });
+}
+
+unsafe fn on_net_change() {
+    let a = app();
+    let Some((wifi, bt)) = NET.lock().unwrap().take() else { return };
+    let first = !a.net_known;
+    a.net_known = true;
+    let show = a.store.indicators && !first;
+    if show {
+        let old = a.wifi.clone().unwrap_or_default();
+        let new = wifi.clone().unwrap_or_default();
+        if new != old {
+            if new.is_empty() {
+                show_indicator("\u{eb5e}", "Wi-Fi disconnected", &old, cr(255, 69, 58), 2600);
+            } else {
+                show_indicator("\u{e701}", "Wi-Fi connected", &new, cr(10, 132, 255), 2600);
+            }
+        }
+        let olds = a.bt.clone().unwrap_or_default();
+        let news = bt.clone().unwrap_or_default();
+        if let Some(d) = news.iter().find(|d| !olds.contains(d)) {
+            show_indicator("\u{e702}", d, "Bluetooth connected", cr(10, 132, 255), 2600);
+        } else if let Some(d) = olds.iter().find(|d| !news.contains(d)) {
+            show_indicator("\u{e702}", d, "Bluetooth disconnected", cr(142, 142, 147), 2600);
+        }
+    }
+    a.wifi = wifi;
+    a.bt = bt;
+    inval(a.hwnd);
+}
+
+// Another app's Windows notification: the toast is a CoreWindow titled
+// "New notification" owned by ShellExperienceHost.exe.
+unsafe extern "system" fn win_event(_h: HWINEVENTHOOK, _ev: u32, hwnd: HWND, id_object: i32, id_child: i32, _t: u32, _ms: u32) {
+    if id_object != 0 || id_child != 0 || hwnd.is_null() {
+        return;
+    }
+    let mut cls = [0u16; 64];
+    let n = GetClassNameW(hwnd, cls.as_mut_ptr(), 64);
+    if String::from_utf16_lossy(&cls[..n.max(0) as usize]) != "Windows.UI.Core.CoreWindow" {
+        return;
+    }
+    let mut title = [0u16; 128];
+    let n = GetWindowTextW(hwnd, title.as_mut_ptr(), 128);
+    let title = String::from_utf16_lossy(&title[..n.max(0) as usize]);
+    if !title.to_lowercase().contains("new notification") {
+        return;
+    }
+    PostMessageW(app().hwnd, WM_TOAST, 0, 0);
+}
+
+unsafe fn on_toast() {
+    let a = app();
+    if !a.store.notif_popup || GetTickCount64().saturating_sub(a.last_own_notify) < 5000 {
+        return;
+    }
+    show_indicator("\u{ea8f}", "New notification", "", WHITE, 4000);
+}
+
+// ---------- calendar math ----------
+fn days_in_month(y: i32, m: i32) -> i32 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ => if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 { 29 } else { 28 },
+    }
+}
+
+// 0 = Sunday
+fn weekday(y: i32, m: i32, d: i32) -> i32 {
+    let t = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    let y = if m < 3 { y - 1 } else { y };
+    (y + y / 4 - y / 100 + y / 400 + t[(m - 1) as usize] + d).rem_euclid(7)
+}
+
+fn date_key(y: i32, m: i32, d: i32) -> String {
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+fn today_ymd() -> (i32, i32, i32) {
+    unsafe {
+        let mut t: SYSTEMTIME = std::mem::zeroed();
+        GetLocalTime(&mut t);
+        (t.wYear as i32, t.wMonth as i32, t.wDay as i32)
+    }
+}
+
+const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const WEEKDAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+fn fmt_min(m: i32) -> String {
+    if m < 0 { "All day".into() } else { format!("{:02}:{:02}", m / 60, m % 60) }
+}
+
+// "14:30 Team call", "9am Gym", "9:15 pm Call mum", "Dentist" (all day)
+fn parse_event(s: &str) -> (i32, String) {
+    let s = s.trim();
+    let mut words: Vec<&str> = s.split_whitespace().collect();
+    if words.is_empty() {
+        return (-1, String::new());
+    }
+    let first = words[0].to_lowercase();
+    let (mut tok, mut ampm) = (first.clone(), "");
+    for suf in ["am", "pm"] {
+        if first.ends_with(suf) && first.len() > 2 {
+            tok = first[..first.len() - 2].to_string();
+            ampm = suf;
+        }
+    }
+    let parsed = if let Some((h, m)) = tok.split_once([':', '.']) {
+        match (h.parse::<i32>(), m.parse::<i32>()) {
+            (Ok(h), Ok(m)) if h < 24 && m < 60 => Some((h, m)),
+            _ => None,
+        }
+    } else if !ampm.is_empty() || (words.len() > 1 && matches!(words[1].to_lowercase().as_str(), "am" | "pm")) {
+        tok.parse::<i32>().ok().filter(|h| *h >= 1 && *h <= 12).map(|h| (h, 0))
+    } else {
+        None
+    };
+    let Some((mut h, m)) = parsed else { return (-1, s.to_string()) };
+    words.remove(0);
+    if ampm.is_empty() && !words.is_empty() && matches!(words[0].to_lowercase().as_str(), "am" | "pm") {
+        ampm = if words[0].eq_ignore_ascii_case("pm") { "pm" } else { "am" };
+        words.remove(0);
+    }
+    if ampm == "pm" && h < 12 {
+        h += 12;
+    } else if ampm == "am" && h == 12 {
+        h = 0;
+    }
+    let title = words.join(" ");
+    (h * 60 + m, if title.is_empty() { "Reminder".into() } else { title })
 }
 
 // ---------- dragging files onto the notch ----------
@@ -2372,9 +2886,23 @@ unsafe fn show_edit(hwnd: HWND, index: Option<usize>) {
         apply_size(hwnd);
     }
     a.edit_index = index;
+    a.edit_target = 0;
+    let text = index.and_then(|i| a.store.tasks.get(i)).map(|t| t.title.clone()).unwrap_or_default();
+    show_edit_at(hwnd, todo_edit_slot(), &text);
+}
+
+unsafe fn show_cal_edit(hwnd: HWND) {
+    let a = app();
+    a.edit_target = 1;
+    a.edit_index = None;
+    show_edit_at(hwnd, cal_edit_slot(), "");
+}
+
+unsafe fn show_edit_at(hwnd: HWND, slot: (i32, i32, i32, i32), text: &str) {
+    let a = app();
     let (dw, dh) = expanded_size();
     let (pw, ph) = px_of((dw, dh), expanded_scale());
-    let (fx, fy, fw, fh) = todo_edit_slot();
+    let (fx, fy, fw, fh) = slot;
     // the edit box is its own small borderless topmost window, inset into
     // the field drawn on the notch (text only; the field is the notch's)
     let sc = expanded_scale();
@@ -2385,8 +2913,7 @@ unsafe fn show_edit(hwnd: HWND, index: Option<usize>) {
     let y_px = oy + (fy * ph / dh) + ((fh * ph / dh) - eh_px) / 2;
     SendMessageW(a.edit_hwnd, WM_SETFONT, get_font("Segoe UI", fpx, 400) as WPARAM, 0);
     SetWindowPos(a.edit_hwnd, HWND_TOPMOST, ox + x * pw / dw, y_px, ew * pw / dw, eh_px, SWP_SHOWWINDOW);
-    let text = index.and_then(|i| a.store.tasks.get(i)).map(|t| t.title.clone()).unwrap_or_default();
-    SetWindowTextW(a.edit_hwnd, wide(&text).as_ptr());
+    SetWindowTextW(a.edit_hwnd, wide(text).as_ptr());
     SendMessageW(a.edit_hwnd, 0x00B1 /* EM_SETSEL */, 0, -1isize as LPARAM);
     ShowWindow(a.edit_hwnd, SW_SHOW);
     SetForegroundWindow(a.edit_hwnd);
@@ -2401,7 +2928,12 @@ unsafe fn commit_edit() {
     ShowWindow(a.edit_hwnd, SW_HIDE);
     if n > 0 {
         let title = String::from_utf16_lossy(&buf[..n as usize]).trim().to_string();
-        if !title.is_empty() {
+        if !title.is_empty() && a.edit_target == 1 {
+            let (y, m, d) = a.cal_sel;
+            let (min, t) = parse_event(&title);
+            a.store.events.push(store::Event { date: date_key(y, m, d), min, title: t, fired: false });
+            store::save(&a.store);
+        } else if !title.is_empty() {
             match a.edit_index.and_then(|i| a.store.tasks.get_mut(i)) {
                 Some(t) => t.title = title,
                 None => a.store.tasks.push(store::Task { title, done: false }),
@@ -2450,12 +2982,12 @@ unsafe fn collapse(hwnd: HWND) {
     let a = app();
     let edit_visible = !a.edit_hwnd.is_null() && IsWindowVisible(a.edit_hwnd) != 0;
     if !a.expanded && a.revealed && !a.drop_hover && a.shelf_press.is_none() {
-        a.revealed = false;
-        apply_size(hwnd);
+        // the minimized notch stays a few seconds before hiding again
+        a.hide_at = GetTickCount64() + HIDE_DELAY_MS;
         return;
     }
     if a.expanded && !edit_visible && !a.vol_drag && !a.drop_hover {
-        a.revealed = false;
+        a.hide_at = GetTickCount64() + HIDE_DELAY_MS;
         a.expanded = false;
         a.dots_hover = false;
         a.hover = (0, -1);
@@ -2883,6 +3415,19 @@ unsafe fn paint_settings_window(hdc: HDC, w: i32, h: i32) {
                 row("Files on the Shelf", "", RowKind::Plain(if a.shelf_items.is_empty() { "None".into() } else { format!("Clear {}", a.shelf_items.len()) }, A_SHELF_CLEAR)),
             ]);
         }
+        8 => {
+            s_h2(hdc, x0, cw, &mut y, "Pages");
+            s_group(hdc, x0, cw, &mut y, &[
+                row("System Monitor", "CPU, RAM, GPU, network and disk", RowKind::Switch(st.show_sysmon, A_SHOW_SYSMON, true)),
+                row("Calendar", "Month view with reminders for any day", RowKind::Switch(st.show_calendar, A_SHOW_CAL, true)),
+            ]);
+            s_h2(hdc, x0, cw, &mut y, "Popups in the minimized notch");
+            s_group(hdc, x0, cw, &mut y, &[
+                row("Status indicators", "Caps Lock, Num Lock, Wi-Fi and Bluetooth changes", RowKind::Switch(st.indicators, A_INDICATORS, true)),
+                row("Other apps' notifications", "Pops up when a Windows notification appears", RowKind::Switch(st.notif_popup, A_NOTIF_POPUP, true)),
+            ]);
+        }
+
         _ => {
             let cx = x0 + cw / 2;
             y += 6;
@@ -3079,6 +3624,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             DragAcceptFiles(hwnd, 1);
             dnd::register(hwnd, dnd::Handlers { enter: drag_enter_cb, leave: drag_leave_cb, drop: drop_cb });
             tray_add(hwnd);
+            {
+                let a = app();
+                a.caps = (GetKeyState(0x14) & 1) != 0;
+                a.num = (GetKeyState(0x90) & 1) != 0;
+                a.scroll = (GetKeyState(0x91) & 1) != 0;
+                let (y, m, d) = today_ymd();
+                a.cal_y = y;
+                a.cal_m = m;
+                a.cal_sel = (y, m, d);
+            }
+            SetWindowsHookExW(WH_KEYBOARD_LL, Some(kb_hook), GetModuleHandleW(null()), 0);
+            SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW, null_mut(), Some(win_event), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+            start_net_watch(hwnd);
             SetTimer(hwnd, TIMER_ID, 1000, None);
             0
         }
@@ -3158,6 +3716,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 if a.animating {
                     return 0;
                 }
+                a.hide_at = 0;
                 if mini_mode() == Mini::Hidden {
                     // first hover at the top centre: show the minimized notch
                     a.revealed = true;
@@ -3461,12 +4020,58 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if let Some((_, plugged)) = battery() {
                 let ac = plugged as i8;
                 if a.last_ac == 0 && ac == 1 && !a.expanded {
+                    a.alert_kind = 0;
                     a.alert_until = now + 3800;
                 }
                 a.last_ac = ac;
             }
             if a.alert_until > 0 && (now >= a.alert_until || a.expanded) {
                 a.alert_until = 0;
+            }
+            // auto-hide: the revealed minimized notch goes after a delay
+            if a.hide_at > 0 && now >= a.hide_at {
+                a.hide_at = 0;
+                let mut p = POINT { x: 0, y: 0 };
+                GetCursorPos(&mut p);
+                let mut wr: RECT = std::mem::zeroed();
+                GetWindowRect(hwnd, &mut wr);
+                let inside = p.x >= wr.left && p.x < wr.right && p.y >= wr.top && p.y < wr.bottom;
+                if !inside && !a.expanded {
+                    a.revealed = false;
+                    apply_size(hwnd);
+                }
+            }
+            // Calendar reminders due now (within the last hour)
+            {
+                let (y, mo, d) = today_ymd();
+                let key = date_key(y, mo, d);
+                let mut t: SYSTEMTIME = std::mem::zeroed();
+                GetLocalTime(&mut t);
+                let now_min = t.wHour as i32 * 60 + t.wMinute as i32;
+                let mut due: Option<(String, i32)> = None;
+                for e in a.store.events.iter_mut() {
+                    if !e.fired && e.min >= 0 && e.date == key && e.min <= now_min && now_min - e.min < 60 {
+                        e.fired = true;
+                        due = Some((e.title.clone(), e.min));
+                    }
+                }
+                if let Some((title, m)) = due {
+                    store::save(&a.store);
+                    if a.store.sounds {
+                        MessageBeep(0x40);
+                    }
+                    notify(&title, &format!("Reminder \u{00b7} {}", fmt_min(m)), 7);
+                    a.cal_sel = (y, mo, d);
+                    a.cal_y = y;
+                    a.cal_m = mo;
+                    if !a.expanded {
+                        show_notch(hwnd, Some(7));
+                    }
+                }
+            }
+            // System Monitor readings while its page is open
+            if a.expanded && a.page == 6 {
+                a.sys = sysinfo::poll();
             }
             // water day rollover
             let today = today_string();
@@ -3518,6 +4123,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_SHOW_NOTCH => {
             show_notch(hwnd, None);
+            0
+        }
+        WM_LOCKKEY => {
+            on_lock_key(wparam);
+            0
+        }
+        WM_NETCHANGE => {
+            on_net_change();
+            0
+        }
+        WM_TOAST => {
+            on_toast();
             0
         }
         WM_COMMAND => {
@@ -3691,6 +4308,24 @@ fn main() {
             reveal_tick: 0,
             tray_icon: 0,
             notify_page: 3,
+            last_own_notify: 0,
+            hide_at: 0,
+            alert_kind: 0,
+            ind_glyph: String::new(),
+            ind_title: String::new(),
+            ind_sub: String::new(),
+            ind_color: 0,
+            caps: false,
+            num: false,
+            scroll: false,
+            wifi: None,
+            bt: None,
+            net_known: false,
+            sys: sysinfo::Reading::default(),
+            cal_y: 2026,
+            cal_m: 1,
+            cal_sel: (2026, 1, 1),
+            edit_target: 0,
             edit_hwnd: null_mut(),
         });
 

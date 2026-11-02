@@ -10,8 +10,24 @@ pub struct Task {
     pub done: bool,
 }
 
+/// A Calendar reminder: date YYYY-MM-DD, minute of the day (-1 = all day).
+#[derive(Default, Clone)]
+pub struct Event {
+    pub date: String,
+    pub min: i32,
+    pub title: String,
+    pub fired: bool,
+}
+
 #[derive(Default)]
 pub struct Store {
+    pub events: Vec<Event>,
+    pub show_sysmon: bool,
+    pub show_calendar: bool,
+    /// Pop the minimized notch for Caps/Num Lock, Wi-Fi and Bluetooth changes
+    pub indicators: bool,
+    /// Pop the minimized notch when another app shows a Windows notification
+    pub notif_popup: bool,
     pub water_date: String, // YYYY-MM-DD of the water counter
     pub water_ml: i32,
     pub tasks: Vec<Task>,
@@ -111,6 +127,10 @@ pub fn load() -> Store {
     st.lyrics_english = true;
     st.glow = true;
     st.auto_hide = true;
+    st.show_sysmon = true;
+    st.show_calendar = true;
+    st.indicators = true;
+    st.notif_popup = true;
     st.glow_size = 16;
     st.glow_strength = 100;
     st.bottle_ml = 750;
@@ -185,6 +205,16 @@ pub fn load() -> Store {
                     "active_until" => st.active_until = v.parse().unwrap_or(17).clamp(0, 23),
                     "empty_shelf" => st.empty_shelf = v != "0",
                     "auto_hide" => st.auto_hide = v != "0",
+                    "show_sysmon" => st.show_sysmon = v != "0",
+                    "show_calendar" => st.show_calendar = v != "0",
+                    "indicators" => st.indicators = v != "0",
+                    "notif_popup" => st.notif_popup = v != "0",
+                    "event" => {
+                        let mut it = v.splitn(4, '|');
+                        if let (Some(d), Some(m), Some(f), Some(t)) = (it.next(), it.next(), it.next(), it.next()) {
+                            st.events.push(Event { date: d.to_string(), min: m.parse().unwrap_or(-1), fired: f == "1", title: t.to_string() });
+                        }
+                    }
                     "todo" => {
                         let (t, d) = v.rsplit_once('|').unwrap_or((v, "0"));
                         st.tasks.push(Task { title: t.to_string(), done: d == "1" });
@@ -223,7 +253,10 @@ pub fn save(st: &Store) {
     out.push_str(&format!("water_goal={}\ndrink_ml={}\nactive_from={}\nactive_until={}\nempty_shelf={}\n",
         st.water_goal, st.drink_ml, st.active_from, st.active_until, b(st.empty_shelf)));
     out.push_str(&format!("glow_color={}\nglow_size={}\nglow_strength={}\nbottle_ml={}\n", st.glow_color, st.glow_size, st.glow_strength, st.bottle_ml));
-    out.push_str(&format!("auto_hide={}\n", b(st.auto_hide)));
+    out.push_str(&format!("auto_hide={}\nshow_sysmon={}\nshow_calendar={}\nindicators={}\nnotif_popup={}\n", b(st.auto_hide), b(st.show_sysmon), b(st.show_calendar), b(st.indicators), b(st.notif_popup)));
+    for e in &st.events {
+        out.push_str(&format!("event={}|{}|{}|{}\n", e.date, e.min, if e.fired { 1 } else { 0 }, e.title.replace(['\n', '\r'], " ")));
+    }
     let hist: Vec<String> = st.water_hist.iter().map(|(d, m)| format!("{}:{}", d, m)).collect();
     out.push_str(&format!("water_hist={}\n", hist.join(",")));
     let log: Vec<String> = st.water_log.iter().map(|(h, m)| format!("{}:{}", h, m)).collect();
