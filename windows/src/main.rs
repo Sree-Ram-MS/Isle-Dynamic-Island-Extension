@@ -1,4 +1,4 @@
-// Isle for Windows — native Rust v0.6.0
+// Isle for Windows — native Rust v0.7.0
 // The full app on the spike's skeleton: one top-edge window, one UI thread,
 // GDI drawing (double-buffered), real functionality per page:
 //   Music    — WinRT GSMTC (media.rs) + LRCLIB synced lyrics split-pane
@@ -19,6 +19,7 @@
 
 #![windows_subsystem = "windows"]
 
+mod dnd;
 mod lyrics;
 mod media;
 mod gfx;
@@ -137,6 +138,13 @@ const A_LYRICS_EN: i32 = 85;
 const A_GLOW: i32 = 86;
 const A_WATER_SETTINGS: i32 = 87;
 const S_MINIMIZE: i32 = 102;
+const A_GLOW_COLOR: i32 = 88;
+const A_GLOW_SIZE: i32 = 89;
+const A_GLOW_STRENGTH: i32 = 90;
+const A_BOTTLE: i32 = 91;
+const A_WATER_VIEW: i32 = 92;
+const A_WSET_BACK: i32 = 93;
+const A_TODO_RENAME: i32 = 94;
 
 // Settings window (Nusa Settings design), in design units (96-dpi pixels).
 const SET_W: i32 = 820;
@@ -235,6 +243,13 @@ struct App {
     shelf_items: Vec<ShelfItem>,
     editing: bool,
     edit_hwnd: HWND,
+    // which task the edit box renames (None = adding a new one)
+    edit_index: Option<usize>,
+    // Water page: in-notch settings view, right-panel view (gauge/hours/week)
+    water_settings: bool,
+    water_view: u8,
+    // a file drag is over the notch
+    drop_hover: bool,
 }
 
 static mut APP: Option<App> = None;
@@ -461,8 +476,23 @@ fn notch_monitor() -> RECT {
     unsafe { RECT { left: 0, top: 0, right: GetSystemMetrics(SM_CXSCREEN), bottom: GetSystemMetrics(SM_CYSCREEN) } }
 }
 
-// Glow margin around the notch (design units).
-const GLOW: i32 = 16;
+// Glow margin around the notch (design units): the glow size setting.
+fn glow_margin() -> i32 {
+    if app().store.glow { app().store.glow_size } else { 0 }
+}
+
+fn glow_color() -> u32 {
+    let a = app();
+    match a.store.glow_color {
+        1 => cr(10, 132, 255),
+        2 => cr(191, 90, 242),
+        3 => cr(255, 55, 95),
+        4 => cr(255, 159, 10),
+        5 => cr(235, 235, 245),
+        6 => page_color(a.page),
+        _ => cr(48, 209, 88),
+    }
+}
 
 unsafe fn place_window(_hwnd: HWND, _w: i32, _h: i32) {
     present();
@@ -536,7 +566,7 @@ unsafe fn present() {
     a.presenting = true;
     let sc = expanded_scale() as f32 / 100.0;
     let (w, h) = a.cur_px;
-    let g = (GLOW as f32 * sc).ceil() as i32;
+    let g = (glow_margin() as f32 * sc).ceil() as i32;
     let gap = top_gap();
     let (ww, wh) = (w + 2 * g, gap + h + g);
     let m = notch_monitor();
@@ -563,13 +593,16 @@ unsafe fn present() {
             collapsed_radius() as f32
         };
         let (wf, hf) = (w as f32, h as f32);
-        // soft green glow: stacked translucent outlines fading outwards
-        if a.store.glow {
+        // soft glow: stacked translucent outlines fading outwards, in the
+        // chosen colour, size and strength
+        if a.store.glow && g > 0 {
+            let k = a.store.glow_strength as f32 / 100.0;
+            let col = glow_color();
             for i in (1..=g).rev() {
                 let t = i as f32 / g as f32;
-                let alpha = 0.07 * (1.0 - t) * (1.0 - t) + 0.004;
+                let alpha = ((0.07 * (1.0 - t) * (1.0 - t) + 0.004) * k).min(0.5);
                 let fi = i as f32;
-                gfx::fill_round(nx - fi, ny - fi, wf + 2.0 * fi, hf + 2.0 * fi, rad + fi, cr(48, 209, 88), alpha);
+                gfx::fill_round(nx - fi, ny - fi, wf + 2.0 * fi, hf + 2.0 * fi, rad + fi, col, alpha);
             }
         }
         gfx::fill_round(nx, ny, wf, hf, rad, BLACK, 1.0);
@@ -798,7 +831,17 @@ unsafe fn paint(hdc: HDC, w: i32, h: i32, expanded: bool) {
     let a = app();
     let page = a.page;
     // header: page name / clock + date
-    if page == 3 {
+    if page == 3 && a.water_settings {
+        let hov = a.hover.0 == A_WSET_BACK;
+        fill_circle(hdc, 36, 22, 12, if hov { cr(62, 62, 66) } else { cr(40, 40, 44) });
+        stroke(hdc, &[POINT { x: 38, y: 17 }, POINT { x: 33, y: 22 }, POINT { x: 38, y: 27 }], 2, WHITE);
+        add_action(20, 6, 110, 32, A_WSET_BACK, 0);
+        draw_text(hdc, "Settings", 56, 0, 120, 44, "Segoe UI", 15, 700, WHITE, DT_LEFT);
+    } else if page == 5 {
+        let ww = text_width("Todo", "Segoe UI", 15, 700, hdc);
+        draw_text(hdc, "Todo", 24, 0, ww + 2, 44, "Segoe UI", 15, 700, WHITE, DT_LEFT);
+        draw_text(hdc, "List", 24 + ww, 0, 80, 44, "Segoe UI", 15, 700, page_color(5), DT_LEFT);
+    } else if page == 3 {
         let ww = text_width("Water ", "Segoe UI", 15, 700, hdc);
         draw_text(hdc, "Water ", 24, 0, ww + 2, 44, "Segoe UI", 15, 700, WHITE, DT_LEFT);
         draw_text(hdc, "Reminder", 24 + ww, 0, 120, 44, "Segoe UI", 15, 700, BLUE, DT_LEFT);
@@ -1195,7 +1238,66 @@ unsafe fn paint_pomo(hdc: HDC, w: i32, _h: i32) {
 
 // Water Reminder (Ram's reference): litres drunk / goal with the reminder
 // bell switch, a progress line, Drink + Settings; a gauge on the right.
-unsafe fn paint_water(hdc: HDC, w: i32, _h: i32) {
+// Water plan from the design: a sip reminder every 15 minutes across the
+// active hours; each sip is the goal shared out over those reminders.
+fn water_plan() -> (i32, i32) {
+    let st = &app().store;
+    let hours = (st.active_until - st.active_from).max(0);
+    let reminders = hours * 4;
+    let sip = if reminders > 0 { ((st.water_goal as f64 / reminders as f64).round() as i32).max(10) } else { st.drink_ml.max(10) };
+    (reminders, sip)
+}
+
+// Days since 1970-01-01 <-> (y, m, d) (proleptic Gregorian).
+fn days_from_civil(y: i32, m: i32, d: i32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y } as i64;
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m as i64 + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+fn civil_from_days(z: i64) -> (i32, i32, i32) {
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as i32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as i32;
+    let y = (yoe + era * 400) as i32 + if m <= 2 { 1 } else { 0 };
+    (y, m, d)
+}
+
+// The last seven days, oldest first: (weekday letter, ml, is today).
+fn water_week() -> Vec<(&'static str, i32, bool)> {
+    let st = &app().store;
+    let t = today_string();
+    let parts: Vec<i32> = t.split('-').filter_map(|p| p.parse().ok()).collect();
+    if parts.len() != 3 {
+        return Vec::new();
+    }
+    let today = days_from_civil(parts[0], parts[1], parts[2]);
+    const WD: [&str; 7] = ["Th", "Fr", "Sa", "Su", "Mo", "Tu", "We"]; // 1970-01-01 was a Thursday
+    (0..7)
+        .map(|i| {
+            let day = today - 6 + i;
+            let (y, m, d) = civil_from_days(day);
+            let key = format!("{:04}-{:02}-{:02}", y, m, d);
+            let ml = if i == 6 { st.water_ml } else { st.water_hist.iter().find(|(k, _)| *k == key).map(|(_, v)| *v).unwrap_or(0) };
+            (WD[day.rem_euclid(7) as usize], ml, i == 6)
+        })
+        .collect()
+}
+
+unsafe fn paint_water(hdc: HDC, w: i32, h: i32) {
+    if app().water_settings {
+        paint_water_settings(hdc, w, h);
+        return;
+    }
     let a = app();
     let ml = a.store.water_ml;
     let goal = a.store.water_goal.max(1);
@@ -1203,13 +1305,13 @@ unsafe fn paint_water(hdc: HDC, w: i32, _h: i32) {
     let pct = (frac * 100.0).round() as i32;
     let grey = cr(161, 161, 166);
     let x0 = 48;
-    let lw = 252; // left column width
+    let lw = 236; // left column width
     // 0.0 / 1.5 L
     let amt = format!("{:.1}", ml as f64 / 1000.0);
     let aw = text_width(&amt, "Segoe UI", 34, 700, hdc);
     draw_text(hdc, &amt, x0, 52, aw + 4, 46, "Segoe UI", 34, 700, WHITE, DT_LEFT);
     let g = format!("{:.1}", goal as f64 / 1000.0);
-    draw_text(hdc, &format!("/ {} L", g.trim_end_matches(".0")), x0 + aw + 6, 64, 90, 30, "Segoe UI", 15, 500, grey, DT_LEFT);
+    draw_text(hdc, &format!("/ {} L", g), x0 + aw + 6, 64, 90, 30, "Segoe UI", 15, 500, grey, DT_LEFT);
     // reminders switch with a bell knob
     let on = a.store.reminders;
     let (sx, sy, sw, sh) = (x0 + lw - 44, 62, 44, 26);
@@ -1228,11 +1330,15 @@ unsafe fn paint_water(hdc: HDC, w: i32, _h: i32) {
     }
     // Drink + Settings
     let by = 140;
-    let hov_d = a.hover.0 == A_DRINK;
+    let (_, sip) = water_plan();
+    let full = ml >= goal;
+    let hov_d = a.hover.0 == A_DRINK && !full;
     fill_round(hdc, x0, by, 82, 34, 34, if hov_d { cr(18, 58, 104) } else { cr(12, 42, 78) });
-    draw_droplet(hdc, x0 + 22, by + 17, BLUE);
-    draw_text(hdc, "Drink", x0 + 34, by, 44, 34, "Segoe UI", 13, 600, BLUE, DT_LEFT);
+    let dc = if full { cr(60, 90, 130) } else { BLUE };
+    draw_droplet(hdc, x0 + 22, by + 17, dc);
+    draw_text(hdc, "Drink", x0 + 34, by, 44, 34, "Segoe UI", 13, 600, dc, DT_LEFT);
     add_action(x0, by, 82, 34, A_DRINK, 0);
+    let _ = sip;
     let sx2 = x0 + 92;
     let hov_s = a.hover.0 == A_WATER_SETTINGS;
     fill_round(hdc, sx2, by, 98, 34, 34, if hov_s { cr(52, 52, 56) } else { cr(38, 38, 42) });
@@ -1240,21 +1346,174 @@ unsafe fn paint_water(hdc: HDC, w: i32, _h: i32) {
     draw_text(hdc, "Settings", sx2 + 34, by, 60, 34, "Segoe UI", 13, 600, WHITE, DT_LEFT);
     add_action(sx2, by, 98, 34, A_WATER_SETTINGS, 0);
     // divider
-    gfx::fill_rect((x0 + lw + 18) as f32, 58.0, 1.0, 118.0, cr(48, 48, 52), 1.0);
-    // gauge: 270 degrees open at the bottom
-    let gx = (x0 + lw + 19 + w - 48) / 2;
-    let gy = 116;
-    let r = 50;
-    draw_arc(hdc, gx, gy, r, 135.0, 270.0, 9, cr(40, 40, 44));
-    if frac > 0.0 {
-        draw_arc(hdc, gx, gy, r, 135.0, 270.0 * frac, 9, BLUE);
+    let px0 = x0 + lw + 18;
+    gfx::fill_rect(px0 as f32, 58.0, 1.0, 118.0, cr(48, 48, 52), 1.0);
+    // right panel: gauge / today by hour / this week, picked with the dots
+    let (rx, rr) = (px0 + 14, w - 48);
+    add_action(rx, 58, rr - rx, 122, A_WATER_VIEW, (a.water_view as i32 + 1) % 3);
+    for i in 0..3 {
+        let on = a.water_view as i32 == i;
+        let dx = rr - 34 + i * 12;
+        let hov = a.hover == (A_WATER_VIEW, i) ;
+        gfx::fill_circle(dx as f32 + 3.0, 52.0, if on { 3.2 } else { 2.6 }, if on || hov { WHITE } else { cr(84, 84, 90) }, 1.0);
+        add_action(dx - 3, 44, 12, 16, A_WATER_VIEW, i);
     }
-    let end = (135.0 + 270.0 * frac).to_radians();
-    let (ex, ey) = (gx as f64 + r as f64 * end.cos(), gy as f64 + r as f64 * end.sin());
-    gfx::fill_circle(ex as f32, ey as f32, 5.5, if frac > 0.0 { WHITE } else { cr(120, 120, 126) }, 1.0);
-    draw_text(hdc, &pct.to_string(), gx - 40, gy - 24, 80, 40, "Segoe UI", 30, 700, WHITE, DT_CENTER);
-    draw_droplet(hdc, gx - 7, gy + 22, cr(120, 120, 126));
-    draw_text(hdc, "%", gx - 1, gy + 14, 20, 18, "Segoe UI", 12, 600, cr(161, 161, 166), DT_LEFT);
+    match a.water_view {
+        1 => water_chart_hours(hdc, rx, rr),
+        2 => water_chart_week(hdc, rx, rr),
+        _ => {
+            // gauge: 270 degrees open at the bottom
+            let gx = (rx + rr) / 2;
+            let gy = 118;
+            let r = 48;
+            draw_arc(hdc, gx, gy, r, 135.0, 270.0, 9, cr(40, 40, 44));
+            if frac > 0.0 {
+                draw_arc(hdc, gx, gy, r, 135.0, 270.0 * frac, 9, BLUE);
+            }
+            let end = (135.0 + 270.0 * frac).to_radians();
+            let (ex, ey) = (gx as f64 + r as f64 * end.cos(), gy as f64 + r as f64 * end.sin());
+            gfx::fill_circle(ex as f32, ey as f32, 5.5, if frac > 0.0 { WHITE } else { cr(120, 120, 126) }, 1.0);
+            draw_text(hdc, &pct.to_string(), gx - 40, gy - 24, 80, 40, "Segoe UI", 30, 700, WHITE, DT_CENTER);
+            draw_droplet(hdc, gx - 7, gy + 22, cr(120, 120, 126));
+            draw_text(hdc, "%", gx - 1, gy + 14, 20, 18, "Segoe UI", 12, 600, cr(161, 161, 166), DT_LEFT);
+        }
+    }
+}
+
+// Bar chart frame shared by the two charts: value labels on the right.
+unsafe fn water_bars(hdc: HDC, rx: i32, rr: i32, vals: &[(String, i32, bool)], top: i32, label: &dyn Fn(i32) -> String, goal_line: Option<i32>) {
+    let grey = cr(142, 142, 147);
+    let (py0, py1) = (66, 158); // plot top / bottom
+    let lab_w = 40;
+    let plot_r = rr - lab_w;
+    for (i, v) in [top, top / 2, 0].iter().enumerate() {
+        let y = py0 + (py1 - py0) * i as i32 / 2;
+        draw_text(hdc, &label(*v), plot_r + 6, y - 8, lab_w - 6, 16, "Segoe UI", 10, 500, grey, DT_LEFT);
+    }
+    let n = vals.len().max(1) as i32;
+    let slot = (plot_r - rx) as f32 / n as f32;
+    let bw = (slot * 0.62).clamp(4.0, 14.0);
+    if let Some(gl) = goal_line {
+        if gl > 0 && gl <= top {
+            let y = py1 as f32 - (py1 - py0) as f32 * gl as f32 / top as f32;
+            let mut x = rx as f32;
+            while x < plot_r as f32 {
+                gfx::fill_rect(x, y, 4.0, 1.0, cr(90, 90, 96), 1.0);
+                x += 7.0;
+            }
+        }
+    }
+    for (i, (lab, v, hi)) in vals.iter().enumerate() {
+        let cx = rx as f32 + slot * (i as f32 + 0.5);
+        let bx = cx - bw / 2.0;
+        gfx::fill_round(bx, py0 as f32, bw, (py1 - py0) as f32, bw / 2.0, cr(30, 30, 34), 1.0);
+        if *v > 0 {
+            let hgt = ((py1 - py0) as f32 * (*v as f32 / top as f32).min(1.0)).max(bw);
+            gfx::fill_round(bx, py1 as f32 - hgt, bw, hgt, bw / 2.0, if *hi { BLUE } else { cr(64, 156, 255) }, 1.0);
+        }
+        if !lab.is_empty() {
+            draw_text(hdc, lab, cx as i32 - 14, py1 + 4, 28, 16, "Segoe UI", 10, if *hi { 700 } else { 500 }, if *hi { WHITE } else { grey }, DT_CENTER);
+        }
+    }
+}
+
+unsafe fn water_chart_hours(hdc: HDC, rx: i32, rr: i32) {
+    let st = &app().store;
+    let mut from = st.active_from;
+    let mut until = st.active_until.max(from + 1);
+    for (hr, _) in &st.water_log {
+        from = from.min(*hr);
+        until = until.max(*hr + 1);
+    }
+    let mut t: SYSTEMTIME = std::mem::zeroed();
+    GetLocalTime(&mut t);
+    let now = t.wHour as i32;
+    let vals: Vec<(String, i32, bool)> = (from..until)
+        .map(|hr| {
+            let ml = st.water_log.iter().filter(|(x, _)| *x == hr).map(|(_, m)| *m).sum();
+            let lab = if (hr - from) % 3 == 1 { format!("{:02}", hr) } else { String::new() };
+            (lab, ml, hr == now)
+        })
+        .collect();
+    let peak = vals.iter().map(|v| v.1).max().unwrap_or(0);
+    let top = ((peak + 199) / 200 * 200).max(400);
+    water_bars(hdc, rx, rr, &vals, top, &|v| if v == 0 { "0 ml".into() } else { v.to_string() }, None);
+}
+
+unsafe fn water_chart_week(hdc: HDC, rx: i32, rr: i32) {
+    let goal = app().store.water_goal;
+    let vals: Vec<(String, i32, bool)> = water_week().into_iter().map(|(d, ml, today)| (d.to_string(), ml, today)).collect();
+    let peak = vals.iter().map(|v| v.1).max().unwrap_or(0).max(goal);
+    let top = (peak + 499) / 500 * 500;
+    water_bars(hdc, rx, rr, &vals, top, &|v| if v == 0 { "0 L".into() } else { format!("{:.1}", v as f64 / 1000.0) }, Some(goal));
+}
+
+// small round  -  /  +  button
+unsafe fn round_btn(hdc: HDC, cx: i32, cy: i32, glyph: &str, code: i32, param: i32) {
+    let hov = app().hover == (code, param);
+    fill_circle(hdc, cx, cy, 13, if hov { cr(62, 62, 66) } else { cr(40, 40, 44) });
+    draw_text(hdc, glyph, cx - 13, cy - 14, 26, 26, "Segoe UI", 17, 600, WHITE, DT_CENTER);
+    add_action(cx - 15, cy - 15, 30, 30, code, param);
+}
+
+// Water settings inside the notch (design: bottle, goal chips, hours,
+// reminders / refills card, reset).
+unsafe fn paint_water_settings(hdc: HDC, w: i32, _h: i32) {
+    let a = app();
+    let grey = cr(142, 142, 147);
+    let lx = 48;
+    let cx0 = 128; // controls start
+    let (reminders, sip) = water_plan();
+    // Bottle
+    let y1 = 66;
+    draw_text(hdc, "Bottle", lx, y1 - 12, 70, 24, "Segoe UI", 14, 600, WHITE, DT_LEFT);
+    round_btn(hdc, cx0 + 13, y1, "\u{2212}", A_BOTTLE, -1);
+    draw_text(hdc, &format!("{} ml", a.store.bottle_ml), cx0 + 28, y1 - 12, 76, 24, "Segoe UI", 15, 700, WHITE, DT_CENTER);
+    round_btn(hdc, cx0 + 119, y1, "+", A_BOTTLE, 1);
+    let per_bottle = if sip > 0 { (a.store.bottle_ml as f64 / sip as f64).round() as i32 } else { 0 };
+    draw_text(hdc, &format!("{} ml each \u{00b7} {}/bottle", sip, per_bottle), cx0 + 138, y1 - 10, 128, 20, "Segoe UI", 10, 400, grey, DT_LEFT);
+    // Goal chips
+    let y2 = 104;
+    draw_text(hdc, "Goal", lx, y2 - 12, 70, 24, "Segoe UI", 14, 600, WHITE, DT_LEFT);
+    let mut x = cx0;
+    for g in store::GOALS {
+        let on = a.store.water_goal == g;
+        let hov = a.hover == (A_WATER_GOAL, g);
+        let bg = if on { cr(10, 132, 255) } else if hov { cr(48, 48, 52) } else { cr(34, 34, 38) };
+        fill_round(hdc, x, y2 - 13, 56, 26, 26, bg);
+        draw_text(hdc, &format!("{:.1} L", g as f64 / 1000.0), x, y2 - 13, 56, 26, "Segoe UI", 12, 600, if on { WHITE } else { grey }, DT_CENTER);
+        add_action(x, y2 - 13, 56, 26, A_WATER_GOAL, g);
+        x += 62;
+    }
+    // Hours
+    let y3 = 142;
+    draw_text(hdc, "Hours", lx, y3 - 12, 70, 24, "Segoe UI", 14, 600, WHITE, DT_LEFT);
+    round_btn(hdc, cx0 + 13, y3, "\u{2212}", A_ACTIVE_FROM, -1);
+    draw_text(hdc, &format!("{:02}:00", a.store.active_from), cx0 + 28, y3 - 12, 52, 24, "Segoe UI", 15, 700, WHITE, DT_CENTER);
+    round_btn(hdc, cx0 + 95, y3, "+", A_ACTIVE_FROM, 1);
+    draw_text(hdc, "to", cx0 + 110, y3 - 12, 24, 24, "Segoe UI", 12, 400, grey, DT_CENTER);
+    round_btn(hdc, cx0 + 149, y3, "\u{2212}", A_ACTIVE_UNTIL, -1);
+    draw_text(hdc, &format!("{:02}:00", a.store.active_until), cx0 + 164, y3 - 12, 52, 24, "Segoe UI", 15, 700, WHITE, DT_CENTER);
+    round_btn(hdc, cx0 + 231, y3, "+", A_ACTIVE_UNTIL, 1);
+    // reminders / refills card + Reset
+    let (kx, kw) = (w - 48 - 116, 116);
+    gfx::fill_round(kx as f32, 50.0, kw as f32, 90.0, 16.0, cr(22, 34, 48), 1.0);
+    draw_text(hdc, &reminders.to_string(), kx, 54, kw, 32, "Segoe UI", 24, 700, CYAN, DT_CENTER);
+    draw_text(hdc, "reminders", kx, 84, kw, 16, "Segoe UI", 11, 500, CYAN, DT_CENTER);
+    let refills = (a.store.water_goal as f64 / a.store.bottle_ml.max(1) as f64).round() as i32;
+    let r = refills.to_string();
+    let rw = text_width(&r, "Segoe UI", 15, 700, hdc);
+    let lab = if refills == 1 { " refill" } else { " refills" };
+    let lw2 = text_width(lab, "Segoe UI", 11, 500, hdc);
+    let rx = kx + (kw - rw - lw2) / 2;
+    draw_text(hdc, &r, rx, 104, rw + 2, 26, "Segoe UI", 15, 700, CYAN, DT_LEFT);
+    draw_text(hdc, lab, rx + rw, 106, lw2 + 4, 24, "Segoe UI", 11, 500, CYAN, DT_LEFT);
+    let flash = GetTickCount64() < a.reset_flash_until;
+    let hov = a.hover.0 == A_WATER_RESET;
+    fill_round(hdc, kx, 150, kw, 26, 26, if hov { cr(48, 48, 52) } else { cr(30, 30, 34) });
+    draw_text(hdc, "\u{e74d}", kx + 14, 150, 18, 26, "Segoe MDL2 Assets", 11, 400, WHITE, DT_CENTER);
+    draw_text(hdc, if flash { "Cleared" } else { "Reset" }, kx + 36, 150, kw - 44, 26, "Segoe UI", 12, 600, WHITE, DT_LEFT);
+    add_action(kx, 150, kw, 26, A_WATER_RESET, 0);
 }
 
 // Shelf: one big dashed drop zone when empty; otherwise file tiles in a
@@ -1264,13 +1523,17 @@ unsafe fn paint_shelf(hdc: HDC, w: i32, _h: i32) {
     let grey = cr(142, 142, 147);
     let dash = cr(84, 84, 90);
     let (zx, zy, zw, zh) = (48, 44, w - 96, 150);
-    if a.shelf_items.is_empty() {
-        gfx::fill_round(zx as f32, zy as f32, zw as f32, zh as f32, 18.0, cr(14, 14, 16), 1.0);
-        gfx::stroke_round(zx as f32 + 0.75, zy as f32 + 0.75, zw as f32 - 1.5, zh as f32 - 1.5, 18.0, 1.5, true, dash, 1.0);
+    let over = a.drop_hover;
+    let dash = if over { page_color(4) } else { dash };
+    if a.shelf_items.is_empty() || over {
+        let bg = if over { cr(36, 28, 6) } else { cr(14, 14, 16) };
+        gfx::fill_round(zx as f32, zy as f32, zw as f32, zh as f32, 18.0, bg, 1.0);
+        gfx::stroke_round(zx as f32 + 0.75, zy as f32 + 0.75, zw as f32 - 1.5, zh as f32 - 1.5, 18.0, if over { 2.0 } else { 1.5 }, true, dash, 1.0);
         let my = zy + zh / 2;
-        draw_text(hdc, "\u{e896}", w / 2 - 20, my - 46, 40, 40, "Segoe MDL2 Assets", 28, 400, cr(225, 225, 230), DT_CENTER);
-        draw_text(hdc, "Drop files here", zx, my - 2, zw, 22, "Segoe UI", 15, 600, WHITE, DT_CENTER);
-        draw_text(hdc, "Drag files onto the notch \u{00b7} click one to open it", zx, my + 20, zw, 18, "Segoe UI", 11, 400, grey, DT_CENTER);
+        draw_text(hdc, "\u{e896}", w / 2 - 20, my - 46, 40, 40, "Segoe MDL2 Assets", 28, 400, if over { page_color(4) } else { cr(225, 225, 230) }, DT_CENTER);
+        draw_text(hdc, if over { "Release to add to the Shelf" } else { "Drop files here" }, zx, my - 2, zw, 22, "Segoe UI", 15, 600, WHITE, DT_CENTER);
+        let sub = if over { format!("{} on the Shelf", a.shelf_items.len()) } else { "Drag files onto the notch \u{00b7} click one to open it".to_string() };
+        draw_text(hdc, &sub, zx, my + 20, zw, 18, "Segoe UI", 11, 400, grey, DT_CENTER);
         return;
     }
     let n = a.shelf_items.len();
@@ -1309,62 +1572,113 @@ unsafe fn paint_shelf(hdc: HDC, w: i32, _h: i32) {
 
 const TAG_COLORS: [u32; 5] = [cr(255, 69, 58), cr(10, 132, 255), cr(255, 159, 10), cr(191, 90, 242), cr(48, 209, 88)];
 
-unsafe fn paint_todo(hdc: HDC, w: i32, _h: i32) {
+// To-do (design): big done/total count, "Task Done Today", Add Task and
+// Edit Task on the left; the task list in a rounded card on the right.
+// Edit mode: click a task to rename it, the cross deletes it.
+const TODO_CARD: (i32, i32, i32, i32) = (284, 50, 228, 138); // x, y, w, h
+const TODO_ROW_H: i32 = 30;
+
+fn todo_rows_visible() -> usize {
+    ((TODO_CARD.3 - 16) / TODO_ROW_H) as usize
+}
+
+unsafe fn paint_todo(hdc: HDC, _w: i32, _h: i32) {
     let a = app();
-    let aside_w = 84;
+    let grey = cr(142, 142, 147);
     let lx = 48;
-    let lw = w - 48 - aside_w - 14 - 14;
-    let editing_box = !a.edit_hwnd.is_null() && IsWindowVisible(a.edit_hwnd) != 0;
-    let max_rows = if editing_box { 2 } else { 3 };
-    let n = a.store.tasks.len().min(max_rows) as i32;
-    let more = a.store.tasks.len() as i32 - n;
-    let rows_h = n.max(1) * 34 + if editing_box { 34 } else { 0 } + if more > 0 { 16 } else { 0 };
-    let mut y = PMID - (22 + rows_h) / 2;
-    draw_text(hdc, "To-do", lx, y, lw, 20, "Segoe UI", 15, 700, WHITE, DT_LEFT);
-    y += 24;
-    if a.store.tasks.is_empty() && !editing_box {
-        draw_text(hdc, "No tasks yet", lx, y, lw, 29, "Segoe UI", 13, 400, cr(99, 99, 108), DT_LEFT);
-    }
-    for (i, t) in a.store.tasks.iter().take(max_rows).enumerate() {
-        fill_round(hdc, lx, y, lw, 29, 18, cr(28, 28, 30));
-        // round check box
-        let (ccx, ccy) = (lx + 18, y + 15);
-        if t.done {
-            fill_circle(hdc, ccx, ccy, 8, cr(48, 209, 88));
-            fill_circle(hdc, ccx, ccy, 6, cr(28, 28, 30));
-            fill_circle(hdc, ccx, ccy, 4, cr(48, 209, 88));
-        } else {
-            fill_circle(hdc, ccx, ccy, 8, cr(99, 99, 102));
-            fill_circle(hdc, ccx, ccy, 6, cr(28, 28, 30));
-        }
-        let col = if t.done { cr(142, 142, 147) } else { WHITE };
-        let title = t.title.clone();
-        let tw = text_width(&title, "Segoe UI", 13, 400, hdc).min(lw - 70);
-        draw_text(hdc, &title, lx + 36, y, lw - 70, 29, "Segoe UI", 13, 400, col, DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
-        if t.done {
-            fill_rect_c(hdc, lx + 36, y + 15, tw, 1, col);
-        }
-        fill_round(hdc, lx + lw - 13, y + 8, 3, 14, 3, TAG_COLORS[i % TAG_COLORS.len()]);
-        add_action(lx, y, lw - 30, 29, A_TODO_TOGGLE, i as i32);
-        let hov = a.hover.1 == i as i32 && (a.hover.0 == A_TODO_TOGGLE || a.hover.0 == A_TODO_DELETE);
-        if hov {
-            draw_text(hdc, "\u{2715}", lx + lw - 36, y, 18, 29, "Segoe UI", 11, 400, cr(255, 107, 97), DT_CENTER);
-        }
-        add_action(lx + lw - 40, y, 26, 29, A_TODO_DELETE, i as i32);
-        y += 34;
-    }
-    if more > 0 {
-        draw_text(hdc, &format!("+{} more", more), lx, y - 2, lw, 16, "Segoe UI", 11, 400, cr(99, 99, 108), DT_LEFT);
-    }
-    // aside: done count + Add task
-    let ax = w - 48 - aside_w;
-    fill_rect_c(hdc, ax - 14, PMID - 50, 1, 100, cr(58, 58, 60));
     let done = a.store.tasks.iter().filter(|t| t.done).count();
     let count = format!("{}/{}", done, a.store.tasks.len());
-    draw_text(hdc, &count, ax, PMID - 46, aside_w, 34, "Segoe UI", 26, 700, WHITE, DT_CENTER);
-    draw_text(hdc, "Done today", ax, PMID - 10, aside_w, 15, "Segoe UI", 11, 400, cr(161, 161, 166), DT_CENTER);
-    let bw = text_width("Add task", "Segoe UI", 12, 600, hdc) + 20;
-    pill_btn(hdc, ax + (aside_w - bw) / 2, PMID + 14, "Add task", 12, 600, 10, 24, BLUE, WHITE, A_TODO_ADD, 0);
+    let cw = text_width(&count, "Segoe UI", 40, 700, hdc);
+    draw_text(hdc, &count, lx, 48, cw + 4, 54, "Segoe UI", 40, 700, WHITE, DT_LEFT);
+    draw_text(hdc, "Task Done Today", lx, 100, 200, 20, "Segoe UI", 13, 400, grey, DT_LEFT);
+    // Add Task
+    let by = 134;
+    let hov = a.hover.0 == A_TODO_ADD;
+    let aw = 96;
+    fill_round(hdc, lx, by, aw, 32, 32, if hov { cr(52, 52, 56) } else { cr(34, 34, 38) });
+    fill_circle(hdc, lx + 18, by + 16, 8, WHITE);
+    gfx::fill_rect((lx + 14) as f32, (by + 15) as f32, 8.0, 2.0, BLACK, 1.0);
+    gfx::fill_rect((lx + 17) as f32, (by + 12) as f32, 2.0, 8.0, BLACK, 1.0);
+    draw_text(hdc, "Add Task", lx + 31, by, aw - 33, 32, "Segoe UI", 12, 600, WHITE, DT_LEFT);
+    add_action(lx, by, aw, 32, A_TODO_ADD, 0);
+    // Edit Task (dim with no tasks; blue while editing)
+    let ex = lx + aw + 8;
+    let ew = 92;
+    let has = !a.store.tasks.is_empty();
+    let on = a.editing && has;
+    let hov_e = a.hover.0 == A_TODO_EDIT && has;
+    let bg = if on { cr(10, 132, 255) } else if hov_e { cr(52, 52, 56) } else if has { cr(34, 34, 38) } else { cr(22, 22, 25) };
+    let fg = if has { WHITE } else { cr(84, 84, 90) };
+    fill_round(hdc, ex, by, ew, 32, 32, bg);
+    draw_text(hdc, "\u{e70f}", ex + 10, by, 18, 32, "Segoe MDL2 Assets", 12, 400, fg, DT_CENTER);
+    draw_text(hdc, if on { "Done" } else { "Edit Task" }, ex + 31, by, ew - 35, 32, "Segoe UI", 12, 600, fg, DT_LEFT);
+    if has {
+        add_action(ex, by, ew, 32, A_TODO_EDIT, 0);
+    }
+    // list card
+    let (kx, ky, kw, kh) = TODO_CARD;
+    gfx::fill_round(kx as f32, ky as f32, kw as f32, kh as f32, 18.0, cr(30, 30, 33), 1.0);
+    let edit_box = !a.edit_hwnd.is_null() && IsWindowVisible(a.edit_hwnd) != 0;
+    if a.store.tasks.is_empty() && !edit_box {
+        let mx = kx + kw / 2;
+        gfx::fill_round((mx - 21) as f32, (ky + 30) as f32, 42.0, 42.0, 11.0, cr(52, 52, 56), 1.0);
+        draw_text(hdc, "\u{e9d5}", mx - 21, ky + 30, 42, 42, "Segoe MDL2 Assets", 18, 400, cr(190, 190, 196), DT_CENTER);
+        draw_text(hdc, "No tasks.", kx, ky + 80, kw, 22, "Segoe UI", 13, 500, grey, DT_CENTER);
+        return;
+    }
+    let cap = todo_rows_visible();
+    let n = a.store.tasks.len();
+    // newest-first would hide old ones; keep order, show what fits
+    let slots = if edit_box && a.edit_index.is_none() { cap - 1 } else { cap };
+    let shown = if n > slots { slots - 1 } else { n };
+    let mut y = ky + 8;
+    for (i, t) in a.store.tasks.iter().take(shown).enumerate() {
+        let hov_row = a.hover.1 == i as i32 && matches!(a.hover.0, A_TODO_TOGGLE | A_TODO_DELETE | A_TODO_RENAME);
+        if hov_row {
+            gfx::fill_round((kx + 6) as f32, y as f32, (kw - 12) as f32, (TODO_ROW_H - 2) as f32, 12.0, cr(44, 44, 48), 1.0);
+        }
+        let (ccx, ccy) = (kx + 22, y + TODO_ROW_H / 2 - 1);
+        if t.done {
+            fill_circle(hdc, ccx, ccy, 8, cr(48, 209, 88));
+            stroke(hdc, &[POINT { x: ccx - 4, y: ccy }, POINT { x: ccx - 1, y: ccy + 3 }, POINT { x: ccx + 4, y: ccy - 3 }], 2, BLACK);
+        } else {
+            gfx::arc(ccx as f32, ccy as f32, 7.5, 0.0, 360.0, 1.5, cr(120, 120, 126), 1.0);
+        }
+        let col = if t.done { grey } else { WHITE };
+        let tx = kx + 38;
+        let tmax = kw - 38 - if a.editing { 34 } else { 14 };
+        let title = t.title.clone();
+        let tw = text_width(&title, "Segoe UI", 13, 400, hdc).min(tmax);
+        draw_text(hdc, &title, tx, y, tmax, TODO_ROW_H - 2, "Segoe UI", 13, 400, col, DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+        if t.done {
+            fill_rect_c(hdc, tx, y + TODO_ROW_H / 2 - 1, tw, 1, col);
+        }
+        if a.editing {
+            add_action(kx + 6, y, kw - 44, TODO_ROW_H - 2, A_TODO_RENAME, i as i32);
+            let hd = a.hover == (A_TODO_DELETE, i as i32);
+            draw_text(hdc, "\u{2715}", kx + kw - 32, y, 20, TODO_ROW_H - 2, "Segoe UI", 11, 600, if hd { cr(255, 107, 97) } else { cr(200, 80, 72) }, DT_CENTER);
+            add_action(kx + kw - 38, y, 32, TODO_ROW_H - 2, A_TODO_DELETE, i as i32);
+        } else {
+            add_action(kx + 6, y, kw - 12, TODO_ROW_H - 2, A_TODO_TOGGLE, i as i32);
+        }
+        y += TODO_ROW_H;
+    }
+    if shown < n {
+        draw_text(hdc, &format!("+{} more", n - shown), kx + 38, y, kw - 50, TODO_ROW_H - 4, "Segoe UI", 11, 500, grey, DT_LEFT);
+    }
+}
+
+// Where the edit box goes (design units): the row it renames, or the next
+// free row for a new task.
+fn todo_edit_slot() -> (i32, i32, i32, i32) {
+    let a = app();
+    let (kx, ky, kw, _) = TODO_CARD;
+    let row = match a.edit_index {
+        Some(i) => i as i32,
+        None => (a.store.tasks.len().min(todo_rows_visible() - 1)) as i32,
+    };
+    let row = row.min(todo_rows_visible() as i32 - 1);
+    (kx + 34, ky + 8 + row * TODO_ROW_H + 2, kw - 34 - 12, TODO_ROW_H - 6)
 }
 
 // ---------- settings ----------
@@ -1436,6 +1750,7 @@ unsafe fn goto_page(hwnd: HWND, page: usize) {
     let a = app();
     a.page = page % PAGES;
     a.hover = (0, -1);
+    a.water_settings = false;
     if a.page == 1 {
         let m = media::snapshot();
         if m.present && !m.title.is_empty() {
@@ -1533,12 +1848,28 @@ unsafe fn do_action(code: i32, param: i32, x: i32, _y: i32, hwnd: HWND) {
             store::save(&a.store);
             present();
         }
-        A_WATER_SETTINGS => {
-            a.settings_section = 6;
-            open_settings();
-            if !a.settings_hwnd.is_null() {
-                InvalidateRect(a.settings_hwnd, null(), 0);
-            }
+        A_WATER_SETTINGS => a.water_settings = true,
+        A_WSET_BACK => a.water_settings = false,
+        A_WATER_VIEW => a.water_view = param.clamp(0, 2) as u8,
+        A_BOTTLE => {
+            a.store.bottle_ml = (a.store.bottle_ml + 50 * param).clamp(100, 5000);
+            store::save(&a.store);
+        }
+        A_GLOW_COLOR => {
+            let n = store::GLOW_COLORS.len() as i32;
+            a.store.glow_color = (a.store.glow_color + param).rem_euclid(n);
+            store::save(&a.store);
+            present();
+        }
+        A_GLOW_SIZE => {
+            a.store.glow_size = param;
+            store::save(&a.store);
+            present();
+        }
+        A_GLOW_STRENGTH => {
+            a.store.glow_strength = param;
+            store::save(&a.store);
+            present();
         }
         A_LYRICS_EN => {
             a.store.lyrics_english = !a.store.lyrics_english;
@@ -1641,7 +1972,8 @@ unsafe fn do_action(code: i32, param: i32, x: i32, _y: i32, hwnd: HWND) {
         A_DRINK => {
             if a.store.water_ml < a.store.water_goal {
                 let before = a.store.water_ml;
-                a.store.water_ml = (a.store.water_ml + a.store.drink_ml).min(a.store.water_goal);
+                let (_, sip) = water_plan();
+                a.store.water_ml = (a.store.water_ml + sip).min(a.store.water_goal);
                 let mut t: SYSTEMTIME = std::mem::zeroed();
                 GetLocalTime(&mut t);
                 let hr = t.wHour as i32;
@@ -1673,11 +2005,13 @@ unsafe fn do_action(code: i32, param: i32, x: i32, _y: i32, hwnd: HWND) {
             }
         }
         A_TODO_ADD => {
-            show_edit(hwnd);
+            a.editing = false;
+            show_edit(hwnd, None);
         }
         A_TODO_EDIT => {
             a.editing = !a.editing;
         }
+        A_TODO_RENAME => show_edit(hwnd, Some(param as usize)),
         A_TODO_TOGGLE => {
             // delete hit-zone takes precedence: it was added after toggle
             if let Some(t) = a.store.tasks.get_mut(param as usize) {
@@ -1689,6 +2023,9 @@ unsafe fn do_action(code: i32, param: i32, x: i32, _y: i32, hwnd: HWND) {
             let idx = param as usize;
             if idx < a.store.tasks.len() {
                 a.store.tasks.remove(idx);
+                if a.store.tasks.is_empty() {
+                    a.editing = false;
+                }
                 store::save(&a.store);
             }
         }
@@ -1701,27 +2038,77 @@ unsafe fn do_action(code: i32, param: i32, x: i32, _y: i32, hwnd: HWND) {
     }
 }
 
+// ---------- dragging files onto the notch ----------
+// A file dragged over the notch opens it on the Shelf right away.
+unsafe fn drag_enter_cb() {
+    let a = app();
+    a.drop_hover = true;
+    a.popup_until = 0;
+    if a.page != 4 {
+        goto_page(a.hwnd, 4);
+    }
+    if !a.expanded {
+        a.expanded = true;
+        apply_size(a.hwnd);
+    }
+    inval(a.hwnd);
+}
+
+unsafe fn drag_leave_cb() {
+    let a = app();
+    a.drop_hover = false;
+    let mut p = POINT { x: 0, y: 0 };
+    GetCursorPos(&mut p);
+    let mut wr: RECT = std::mem::zeroed();
+    GetWindowRect(a.hwnd, &mut wr);
+    if !(p.x >= wr.left && p.x < wr.right && p.y >= wr.top && p.y < wr.bottom) {
+        collapse(a.hwnd);
+    }
+    inval(a.hwnd);
+}
+
+unsafe fn drop_cb(paths: Vec<String>) {
+    let a = app();
+    a.drop_hover = false;
+    for path in paths {
+        if !path.is_empty() && !a.store.shelf.contains(&path) {
+            a.store.shelf.push(path);
+        }
+    }
+    a.shelf_items = build_shelf_items(&a.store);
+    store::save(&a.store);
+    if a.page != 4 {
+        goto_page(a.hwnd, 4);
+    }
+    a.expanded = true;
+    // no mouse messages arrive during a drag: close after a few seconds
+    // unless the pointer is on the notch then
+    a.tracking = false;
+    a.popup_until = GetTickCount64() + 4000;
+    apply_size(a.hwnd);
+}
+
 // ---------- todo inline edit ----------
-unsafe fn show_edit(hwnd: HWND) {
+unsafe fn show_edit(hwnd: HWND, index: Option<usize>) {
     let a = app();
     if a.page != 5 {
         a.page = 5;
         apply_size(hwnd);
     }
+    a.edit_index = index;
     let (dw, dh) = expanded_size();
     let (pw, ph) = px_of((dw, dh), expanded_scale());
-    // under the visible tasks, in the list column (design -> physical)
-    let n = a.store.tasks.len().min(2) as i32;
-    let rows_h = n.max(1) * 34 + 34;
-    let top = 121 - (22 + rows_h) / 2 + 24 + n * 34;
-    let lw = dw - 48 - 84 - 28;
+    let (x, y, ew, eh) = todo_edit_slot();
     // the edit box is its own small topmost window over the notch
     let (ox, oy) = (a.win_pos.0 + a.notch_off.0, a.win_pos.1 + a.notch_off.1);
-    SetWindowPos(a.edit_hwnd, HWND_TOPMOST, ox + 48 * pw / dw, oy + top * ph / dh, lw * pw / dw, 28 * ph / dh, SWP_SHOWWINDOW);
-    SetWindowTextW(a.edit_hwnd, wide("").as_ptr());
+    SetWindowPos(a.edit_hwnd, HWND_TOPMOST, ox + x * pw / dw, oy + y * ph / dh, ew * pw / dw, eh * ph / dh, SWP_SHOWWINDOW);
+    let text = index.and_then(|i| a.store.tasks.get(i)).map(|t| t.title.clone()).unwrap_or_default();
+    SetWindowTextW(a.edit_hwnd, wide(&text).as_ptr());
+    SendMessageW(a.edit_hwnd, 0x00B1 /* EM_SETSEL */, 0, -1isize as LPARAM);
     ShowWindow(a.edit_hwnd, SW_SHOW);
     SetForegroundWindow(a.edit_hwnd);
     SetFocus(a.edit_hwnd);
+    inval(hwnd);
 }
 
 unsafe fn commit_edit() {
@@ -1732,7 +2119,10 @@ unsafe fn commit_edit() {
     if n > 0 {
         let title = String::from_utf16_lossy(&buf[..n as usize]).trim().to_string();
         if !title.is_empty() {
-            a.store.tasks.push(store::Task { title, done: false });
+            match a.edit_index.and_then(|i| a.store.tasks.get_mut(i)) {
+                Some(t) => t.title = title,
+                None => a.store.tasks.push(store::Task { title, done: false }),
+            }
             store::save(&a.store);
         }
     }
@@ -1780,6 +2170,8 @@ unsafe fn collapse(hwnd: HWND) {
         a.expanded = false;
         a.dots_hover = false;
         a.hover = (0, -1);
+        a.water_settings = false;
+        a.editing = false;
         apply_size(hwnd);
     }
 }
@@ -2142,7 +2534,13 @@ unsafe fn paint_settings_window(hdc: HDC, w: i32, h: i32) {
             s_group(hdc, x0, cw, &mut y, &[
                 row("Open the notch", "", seg(&[("Hover", 0), ("Click", 1)], st.open_click as i32, A_OPEN_MODE)),
                 row("Page icons", "Show page icons when you hover the page dots", RowKind::Switch(st.page_icons, A_PAGE_ICONS, true)),
-                row("Green glow", "A soft green light around the notch", RowKind::Switch(st.glow, A_GLOW, true)),
+            ]);
+            s_h2(hdc, x0, cw, &mut y, "Glow");
+            s_group(hdc, x0, cw, &mut y, &[
+                row("Glow", "A soft light around the notch", RowKind::Switch(st.glow, A_GLOW, true)),
+                row("Colour", "", RowKind::Step(store::GLOW_COLORS[st.glow_color as usize].into(), A_GLOW_COLOR)),
+                row("Size", "", seg(&[("Small", 10), ("Medium", 16), ("Large", 24)], st.glow_size, A_GLOW_SIZE)),
+                row("Strength", "", seg(&[("Soft", 55), ("Normal", 100), ("Strong", 170)], st.glow_strength, A_GLOW_STRENGTH)),
             ]);
             s_h2(hdc, x0, cw, &mut y, "Motion");
             s_group(hdc, x0, cw, &mut y, &[row("Animation speed", "", seg(&[("Normal", 0), ("Fast", 1)], st.anim_fast as i32, A_ANIM))]);
@@ -2177,11 +2575,11 @@ unsafe fn paint_settings_window(hdc: HDC, w: i32, h: i32) {
         }
         6 => {
             s_h2(hdc, x0, cw, &mut y, "Reminders");
-            s_group(hdc, x0, cw, &mut y, &[row("Water reminders", "Spread across your active hours", RowKind::Switch(st.reminders, A_WATER_BELL, true))]);
+            s_group(hdc, x0, cw, &mut y, &[row("Water reminders", "A sip every 15 minutes in your active hours", RowKind::Switch(st.reminders, A_WATER_BELL, true))]);
             s_h2(hdc, x0, cw, &mut y, "Plan");
             s_group(hdc, x0, cw, &mut y, &[
                 row("Daily goal", "", seg(&[("1.5 L", 1500), ("2 L", 2000), ("2.5 L", 2500), ("3 L", 3000)], st.water_goal, A_WATER_GOAL)),
-                row("Per drink", "", RowKind::Step(format!("{} ml", st.drink_ml), A_DRINK_ML)),
+                row("Bottle", "", RowKind::Step(format!("{} ml", st.bottle_ml), A_BOTTLE)),
                 row("Active from", "", RowKind::Step(hour_str(st.active_from), A_ACTIVE_FROM)),
                 row("Active until", "", RowKind::Step(hour_str(st.active_until), A_ACTIVE_UNTIL)),
             ]);
@@ -2389,6 +2787,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             SendMessageW(edit, WM_SETFONT, font as WPARAM, 1);
             SetWindowSubclass(edit, Some(edit_subclass), 1, 0);
             DragAcceptFiles(hwnd, 1);
+            dnd::register(hwnd, dnd::Handlers { enter: drag_enter_cb, leave: drag_leave_cb, drop: drop_cb });
             SetTimer(hwnd, TIMER_ID, 1000, None);
             0
         }
@@ -2546,24 +2945,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             0
         }
         WM_DROPFILES => {
+            // fallback when OLE drag and drop could not be registered
             let hdrop = wparam as HDROP;
             let count = DragQueryFileW(hdrop, 0xFFFFFFFF, null_mut(), 0);
-            let a = app();
+            let mut paths = Vec::new();
             for i in 0..count {
                 let len = DragQueryFileW(hdrop, i, null_mut(), 0);
                 let mut buf = vec![0u16; len as usize + 1];
                 DragQueryFileW(hdrop, i, buf.as_mut_ptr(), len + 1);
-                let path = String::from_utf16_lossy(&buf[..len as usize]);
-                if !a.store.shelf.contains(&path) {
-                    a.store.shelf.push(path);
-                }
+                paths.push(String::from_utf16_lossy(&buf[..len as usize]));
             }
-            a.shelf_items = build_shelf_items(&a.store);
-            store::save(&a.store);
             DragFinish(hdrop);
-            a.page = 4;
-            a.expanded = true;
-            apply_size(hwnd);
+            drop_cb(paths);
             0
         }
         // Mouse wheel (vertical) and touchpad swipe (horizontal) flip pages.
@@ -2675,8 +3068,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let (from, until) = (a.store.active_from, a.store.active_until);
                 let hr = t.wHour as i32;
                 if until > from && hr >= from && hr < until {
-                    let drinks = (a.store.water_goal / a.store.drink_ml.max(1)).max(1) as u64;
-                    let every_ms = ((until - from) as u64 * 3_600_000 / drinks).max(15 * 60_000);
+                    // one sip reminder every 15 minutes (see water_plan)
+                    let every_ms = 15 * 60_000u64;
                     if now.saturating_sub(a.last_water_tick) >= every_ms && !a.expanded {
                         a.last_water_tick = now;
                         a.page = 3;
@@ -2714,9 +3107,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // water day rollover
             let today = today_string();
             if a.store.water_date != today {
-                a.store.water_date = today;
-                a.store.water_ml = 0;
-                a.store.water_log.clear();
+                store::roll_water(&mut a.store, &today);
                 store::save(&a.store);
             }
             if a.page == 0 && !a.vol_drag {
@@ -2771,9 +3162,8 @@ fn main() {
         let mut st = store::load();
         let today = today_string();
         if st.water_date != today {
-            st.water_date = today;
-            st.water_ml = 0;
-            st.water_log.clear();
+            store::roll_water(&mut st, &today);
+            store::save(&st);
         }
         if st.empty_shelf && !st.shelf.is_empty() {
             st.shelf.clear();
@@ -2831,6 +3221,10 @@ fn main() {
             store: st,
             shelf_items,
             editing: false,
+            edit_index: None,
+            water_settings: false,
+            water_view: 0,
+            drop_hover: false,
             edit_hwnd: null_mut(),
         });
 

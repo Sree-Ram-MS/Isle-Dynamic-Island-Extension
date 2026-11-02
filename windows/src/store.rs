@@ -42,8 +42,15 @@ pub struct Store {
     pub page_icons: bool,
     /// Faster open / close animation.
     pub anim_fast: bool,
-    /// Soft green glow around the notch.
+    /// Soft glow around the notch, and how it looks.
     pub glow: bool,
+    pub glow_color: i32,    // index into GLOW_COLORS (last = follow the page colour)
+    pub glow_size: i32,     // glow width in design px
+    pub glow_strength: i32, // percent
+    /// Water bottle size in ml (for the sips-per-bottle / refills hints).
+    pub bottle_ml: i32,
+    /// Past days' water totals, oldest first: (YYYY-MM-DD, ml).
+    pub water_hist: Vec<(String, i32)>,
     /// Lyrics button, Lyrics page and lyric fetching.
     pub show_lyrics: bool,
     /// Lyrics in English letters (transliterated) instead of the original script.
@@ -62,6 +69,24 @@ pub struct Store {
 }
 
 pub const GOALS: [i32; 4] = [1500, 2000, 2500, 3000];
+pub const GLOW_COLORS: [&str; 7] = ["Green", "Blue", "Purple", "Pink", "Orange", "White", "Page"];
+pub const GLOW_SIZES: [i32; 3] = [10, 16, 24];
+pub const GLOW_STRENGTHS: [i32; 3] = [55, 100, 170];
+
+/// Start a new water day: keep yesterday's total in the history (7 days).
+pub fn roll_water(st: &mut Store, today: &str) {
+    if !st.water_date.is_empty() && st.water_date.as_str() != today {
+        let d = st.water_date.clone();
+        st.water_hist.retain(|(x, _)| *x != d);
+        st.water_hist.push((d, st.water_ml));
+        while st.water_hist.len() > 7 {
+            st.water_hist.remove(0);
+        }
+    }
+    st.water_date = today.to_string();
+    st.water_ml = 0;
+    st.water_log.clear();
+}
 
 fn data_path() -> PathBuf {
     let base = std::env::var_os("LOCALAPPDATA")
@@ -82,6 +107,9 @@ pub fn load() -> Store {
     st.show_lyrics = true;
     st.lyrics_english = true;
     st.glow = true;
+    st.glow_size = 16;
+    st.glow_strength = 100;
+    st.bottle_ml = 750;
     st.pomo_focus = 25;
     st.pomo_short = 5;
     st.pomo_long = 15;
@@ -120,6 +148,25 @@ pub fn load() -> Store {
                     "page_icons" => st.page_icons = v != "0",
                     "anim_fast" => st.anim_fast = v != "0",
                     "glow" => st.glow = v != "0",
+                    "glow_color" => st.glow_color = v.parse().unwrap_or(0).clamp(0, GLOW_COLORS.len() as i32 - 1),
+                    "glow_size" => {
+                        let g: i32 = v.parse().unwrap_or(16);
+                        st.glow_size = if GLOW_SIZES.contains(&g) { g } else { 16 };
+                    }
+                    "glow_strength" => {
+                        let g: i32 = v.parse().unwrap_or(100);
+                        st.glow_strength = if GLOW_STRENGTHS.contains(&g) { g } else { 100 };
+                    }
+                    "bottle_ml" => st.bottle_ml = v.parse().unwrap_or(750).clamp(100, 5000),
+                    "water_hist" => {
+                        for part in v.split(',') {
+                            if let Some((d, m)) = part.split_once(':') {
+                                if let Ok(m) = m.trim().parse() {
+                                    st.water_hist.push((d.trim().to_string(), m));
+                                }
+                            }
+                        }
+                    }
                     "show_lyrics" => st.show_lyrics = v != "0",
                     "lyrics_english" => st.lyrics_english = v != "0",
                     "pomo_focus" => st.pomo_focus = v.parse().unwrap_or(25).clamp(5, 90),
@@ -170,6 +217,9 @@ pub fn save(st: &Store) {
     out.push_str(&format!("pomo_focus={}\npomo_short={}\npomo_long={}\n", st.pomo_focus, st.pomo_short, st.pomo_long));
     out.push_str(&format!("water_goal={}\ndrink_ml={}\nactive_from={}\nactive_until={}\nempty_shelf={}\n",
         st.water_goal, st.drink_ml, st.active_from, st.active_until, b(st.empty_shelf)));
+    out.push_str(&format!("glow_color={}\nglow_size={}\nglow_strength={}\nbottle_ml={}\n", st.glow_color, st.glow_size, st.glow_strength, st.bottle_ml));
+    let hist: Vec<String> = st.water_hist.iter().map(|(d, m)| format!("{}:{}", d, m)).collect();
+    out.push_str(&format!("water_hist={}\n", hist.join(",")));
     let log: Vec<String> = st.water_log.iter().map(|(h, m)| format!("{}:{}", h, m)).collect();
     out.push_str(&format!("water_log={}\n", log.join(",")));
     for t in &st.tasks {
